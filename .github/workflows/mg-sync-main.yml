@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # 获取完整历史以便 merge
+          lfs: false
 
       # 配置 Git 使用 GITHUB_TOKEN 进行推送（关键！）
       - name: Configure Git credentials for push
@@ -35,10 +36,7 @@ jobs:
 
       # 执行同步脚本
       - name: Run sync script
-        run: |
-          # 设置环境变量跳过 LFS 下载
-          export GIT_LFS_SKIP_SMUDGE=1
-                    
+        run: |            
           git remote add upstream https://github.com/mg-org-1/ComfyUI.git 2>/dev/null || true
           git fetch upstream
           git checkout master
@@ -62,7 +60,6 @@ jobs:
             echo "Merge conflict detected. Resolving by taking upstream version..."
             # 如果有冲突, 用 'theirs' (上游) 版本解决 *所有* 冲突
             git checkout --theirs .
-            git lfs uninstall --local
             git add .
             # 注意：这里我们也不 commit
           fi

@@ -62,6 +62,7 @@ jobs:
             echo "Merge conflict detected. Resolving by taking upstream version..."
             # 如果有冲突, 用 'theirs' (上游) 版本解决 *所有* 冲突
             git checkout --theirs .
+            git lfs uninstall --local
             git add .
             # 注意：这里我们也不 commit
           fi
@@ -74,11 +75,6 @@ jobs:
             cp /tmp/README.md.backup README.md
             git add README.md
             echo "Restored local README.md"
-          else
-            # 如果本地没有，就删除上游的
-            rm -f README.md
-            git add README.md 2>/dev/null || true
-            echo "Removed upstream README.md (not present locally)"
           fi
           
           if [ "$LOCAL_WORKFLOWS_EXIST" = "1" ]; then
@@ -86,11 +82,6 @@ jobs:
             cp -r /tmp/workflows.backup .github/workflows
             git add .github/workflows
             echo "Restored local .github/workflows"
-          else
-            # 如果本地没有，就删除上游的
-            rm -rf .github/workflows 2>/dev/null || true
-            git add .github 2>/dev/null || true
-            echo "Removed upstream .github/workflows (not present locally)"
           fi
           
           # 清理空的 .github 目录

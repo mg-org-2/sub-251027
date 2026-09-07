@@ -62,7 +62,7 @@ class H3SLAAttention(io.ComfyNode):
             inputs=[
                 io.Model.Input("model",
                     tooltip="MODEL,"),
-                io.Float.Input("sparsity_ratio", default=0.90, min=0.0, max=0.95,
+                io.Float.Input("sparsity_ratio", default=0.80, min=0.0, max=0.95,
                     step=0.05, round=False,
                     tooltip=(
                         "Fraction of key blocks skipped. 0.85 is the shipped default "
@@ -72,9 +72,7 @@ class H3SLAAttention(io.ComfyNode):
                         "speech artefacts on H3 -- step count did, so use 6 "
                         "steps rather than lowering this. Break-even is about "
                         "0.60 -- below that "
-                        "this kernel is SLOWER than dense attention, so a low "
-                        "value is a loss, not a safe fallback. If a LoRA "
-                        "cannot take 0.7+, this node has nothing to offer it. "
+                        "this kernel is SLOWER than dense attention,"
                         "0.0 disables sparsity without removing the node.")),
                 io.Combo.Input("block_size", options=list(BLOCK_SIZES),
                     default="32",
@@ -91,7 +89,7 @@ class H3SLAAttention(io.ComfyNode):
                         "gets finer. Use 128 only if you generate without "
                         "meaningful audio. Coming down to 32 has increased "
                         "the quality even further for marginal slowdown ")),
-                io.Int.Input("min_seq_len", default=8192, min=0, max=1000000,
+                io.Int.Input("min_seq_len", default=12228, min=0, max=1000000,
                     step=1024, optional=True,
                     tooltip=(
                         "Sequences shorter than this stay dense. Guards two "
@@ -100,7 +98,7 @@ class H3SLAAttention(io.ComfyNode):
                         "clips, where block selection would cost more than it "
                         "saves. Lower it only if you know your sequence is "
                         "long enough to benefit.")),
-                io.Int.Input("dense_last_steps", default=1, min=0, max=8,
+                io.Int.Input("dense_last_steps", default=0, min=0, max=8,
                     optional=True,
                     tooltip=(
                         "Run the last N sampling steps at full attention. 0 "
@@ -109,7 +107,7 @@ class H3SLAAttention(io.ComfyNode):
                         "can recover fine detail, since the final step's error "
                         "is the one you actually see. Stacks with dense_steps "
                         "below rather than replacing it.")),
-                io.Boolean.Input("protect_audio", default=True,
+                io.Boolean.Input("protect_audio", default=False,
                     label_on="protect", label_off="uniform (turbo parity)",
                     optional=True,
                     tooltip=(
@@ -130,7 +128,7 @@ class H3SLAAttention(io.ComfyNode):
                 # workflows -- which can store widget values positionally --
                 # keep lining up with the right inputs instead of shifting
                 # onto whatever got inserted ahead of them.
-                io.String.Input("dense_steps", default="0", optional=True,
+                io.String.Input("dense_steps", default="1", optional=True,
                     tooltip=(
                         "Explicit 0-based step indices to force dense, on top "
                         "of dense_last_steps -- e.g. '0,1' or '0-2'. Early "
@@ -206,16 +204,81 @@ class H3SLAAttention(io.ComfyNode):
                         "adds no special quota; references still participate "
                         "in ordinary top-k. Default Off preserves the precise "
                         "audio patch's fastest behaviour.")),
+                io.Boolean.Input("tail_correction", default=False,
+                    label_on="on (experimental)", label_off="off",
+                    optional=True,
+                    tooltip=(
+                        "Instead of a hard zero for every key block topk left "
+                        "out, fold in one pooled term standing in for all of "
+                        "them, so nothing leaves the softmax -- same idea as "
+                        "a widely-used block-sparse kernel's tail handling. Scored from "
+                        "the same pooled centroids selection already computes, "
+                        "so the only added cost is one more mean-pool of V "
+                        "plus a small reduction per call, not a second "
+                        "attention pass. Should help most at high sparsity, "
+                        "where the discarded tail is largest. Off by default: "
+                        "new, and its effect on H3 output quality specifically "
+                        "hasn't been validated the way sparsity_ratio's "
+                        "defaults have -- test before trusting it in a real "
+                        "render.")),
+                io.Boolean.Input("use_int8_qk", default=True,
+                    label_on="on (experimental)", label_off="off",
+                    optional=True,
+                    tooltip=(
+                        "Quantize Q and K to int8 (per-token, dynamic scale) "
+                        "before the QK dot product on the selected topk "
+                        "blocks -- PV stays full precision (the mirror "
+                        "use_int8_pv toggle was removed from this node: its "
+                        "hidden widget could still be converted to an input "
+                        "socket and connected, which broke the node -- PV "
+                        "quantization is no longer exposed here). This is "
+                        "SageAttention's qk_int8_pv_fp16 split, not full int8 "
+                        "attention, and it's a different lever from "
+                        "dense_backend above: that setting only affects dense "
+                        "fall-through steps, this affects the sparse compute "
+                        "itself, on every sparse step. Ignored entirely when "
+                        "engine is comfy_kitchen, which quantizes internally "
+                        "regardless. UNTESTED ON HARDWARE: the "
+                        "quantize/dequantize math checks out against exact "
+                        "fp32 scores in isolation, but real speed, launch "
+                        "stability, and output quality on H3 have not been "
+                        "measured on a GPU. Try it against a known-good render "
+                        "before trusting it, and expect to possibly hit a "
+                        "launch failure on some GPU/Triton combinations before "
+                        "it's been shaken out.")),
+                io.Combo.Input("engine", options=["triton", "comfy_kitchen"],
+                    default="comfy_kitchen", optional=True,
+                    tooltip=(
+                        "Which attention implementation runs the sparse path. "
+                        "triton (default) is this node pack's own kernel -- "
+                        "every other widget above applies to it fully. "
+                        "comfy_kitchen instead calls comfy_kitchen's real "
+                        "compiled sol_attn kernel (Comfy-Org/ComfyUI PR "
+                        "#16072, needs comfy-kitchen>=0.2.32 installed): "
+                        "genuine CUDA int8 compute and a built-in pooled tail "
+                        "term, but it can only express ONE contiguous "
+                        "protected range, has no reference-quota tier, and "
+                        "has no cross-step stabilize_motion -- reference_"
+                        "protection, multi-span protect_ranges, and "
+                        "stabilize_motion are silently disabled (one-time log "
+                        "warning each) rather than approximated, and "
+                        "tail_correction/use_int8_qk above are ignored "
+                        "since the real kernel quantizes internally "
+                        "regardless, but now honours tail_correction's "
+                        "on/off setting rather than always applying it. Both "
+                        "fall back to dense the same as any other kernel "
+                        "failure if their kernel is unavailable or throws.")),
             ],
             outputs=[io.Model.Output()],
         )
 
     @classmethod
-    def execute(cls, model, sparsity_ratio=0.90, block_size="32",
-                min_seq_len=8192, dense_last_steps=1, protect_audio=True,
-                enabled=True, dense_steps="0", dense_backend="comfy_kitchen",
+    def execute(cls, model, sparsity_ratio=0.80, block_size="32",
+                min_seq_len=12228, dense_last_steps=0, protect_audio=False,
+                enabled=True, dense_steps="1", dense_backend="comfy_kitchen",
                 disable_fp16_accum=True, stabilize_motion=False,
-                reference_protection="Off") -> io.NodeOutput:
+                reference_protection="Off", tail_correction=False,
+                use_int8_qk=True, engine="comfy_kitchen") -> io.NodeOutput:
         if not enabled:
             log.info("[H3Utils] SLA disabled; model passed through unchanged.")
             return io.NodeOutput(model)
@@ -234,6 +297,9 @@ class H3SLAAttention(io.ComfyNode):
                 protect_audio=protect_audio,
                 stabilize_motion=stabilize_motion,
                 reference_protection=reference_protection,
+                tail_correction=tail_correction,
+                use_int8_qk=use_int8_qk,
+                engine=engine,
             )
         except Exception:                                # noqa: BLE001
             # Triton missing, an incompatible GPU, a ComfyUI API change -- none

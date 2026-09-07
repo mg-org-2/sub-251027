@@ -2,7 +2,10 @@ import { api } from "../../../scripts/api.js";
 import { app } from "../../../scripts/app.js";
 import { allow_debug } from "./js_shared.js";
 
-
+/* this node is compatible with ComfyUI Node.2.
+I use this node as a perfect simple example for an AI agent
+to understand how to create a DOM widget.
+*/
 app.registerExtension({
   name: "iTools.domNode",
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -107,6 +110,7 @@ app.registerExtension({
 
     // Create the widget
     const widget = node.addDOMWidget("CounterWidget", "custom", container, {
+      tooltip: 'Counter Widget',
       getValue: () => ({
         count: parseInt(counterValue.textContent),
         text: textarea.value
@@ -123,7 +127,7 @@ app.registerExtension({
       onDraw: (ctx) => {
       }
     });
-    
+    widget.tooltip = 'Counter Widget'
     // Apply margin directly to the container
     container.style.marginTop = "0px";
     

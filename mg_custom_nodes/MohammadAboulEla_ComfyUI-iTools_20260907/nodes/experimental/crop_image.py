@@ -1,109 +1,16 @@
-import base64
-from PIL import Image, ImageSequence, ImageOps  # type: ignore
-import io
-from ..backend.shared import (
-    pil2tensor,
-    project_dir,
-    base64_to_pil,
-    any_type,
-    FlexibleOptionalInputType,
-)
+import hashlib
 import os
 import folder_paths  # type: ignore
 import node_helpers  # type: ignore
 import numpy as np  # type: ignore
 import torch  # type: ignore
-import hashlib
-from ..backend import iserver
-
-# dev nodes
-class IToolsTestNode:
-    @classmethod
-    def INPUT_TYPES(self):
-        return {
-            "required": {},
-            "optional": FlexibleOptionalInputType(any_type),
-        }
-
-    CATEGORY = "iTools"
-
-    RETURN_TYPES = ("STRING", "INT")
-    RETURN_NAMES = ("my_counter_string", "my_counter")
-    FUNCTION = "test_func"
-    DESCRIPTION = "The widgets and logic of this node runs in javascript code, only the result is sent to python class"
-
-    def test_func(self, **kwargs):
-        for key, value in kwargs.items():
-            print(key, value)
-            if key == "Click":
-                Click = int(value)
-        return str(Click), Click
-
-
-class IToolsDomNode:
-    @classmethod
-    def INPUT_TYPES(self):
-        return {
-            "required": {},
-            "optional": FlexibleOptionalInputType(any_type),
-        }
-
-    CATEGORY = "iTools"
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("output",)
-    FUNCTION = "dom_func"
-    DESCRIPTION = "Example to create dom HTML object in nodes"
-    OUTPUT_NODE = True
-
-    def dom_func(self, **kwargs):
-        counter = 0
-        for key, value in kwargs.items():
-            if key == "CounterWidget":
-                print(key, value)
-                counter = str(value["count"]) or "0"
-                text = value["text"] or ""
-        return (str(text + " " + counter),)
-
-# beta nodes
-class IToolsPaintNode:
-    @classmethod
-    def INPUT_TYPES(self):
-        return {
-            "required": {},
-            "optional": FlexibleOptionalInputType(any_type),
-        }
-
-    CATEGORY = "iTools"
-
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
-    FUNCTION = "paint_func"
-    DESCRIPTION = "Will paint"
-
-    def paint_func(self, **kwargs):
-        save_directory = os.path.join(project_dir, "backend")
-        background_path = os.path.join(
-            save_directory, "iToolsPaintedImage_background.png"
-        )
-        foreground_path = os.path.join(
-            save_directory, "iToolsPaintedImage_foreground.png"
-        )
-        background_img = Image.open(background_path)
-        foreground_img = Image.open(foreground_path)
-
-        # Overlay the foreground onto the background
-        final_img = Image.alpha_composite(background_img, foreground_img)
-
-        final_img = final_img.convert("RGB")
-
-        result = [final_img]
-        return pil2tensor(result)
-
-    def IS_CHANGED(
-        cls,
-    ):
-        return True
+from PIL import Image, ImageSequence, ImageOps  # type: ignore
+from ...backend.shared import (
+    pil2tensor,
+    base64_to_pil,
+    FlexibleOptionalInputType,
+    any_type,
+)
 
 
 class IToolsCropImage:
@@ -148,13 +55,12 @@ class IToolsCropImage:
     OUTPUT_NODE = True
 
     def crop_image(self, image, **kwargs):
+        cropped_img = None
         for key, value in kwargs.items():
             if key == "crop" and value is not None:
-                # print(f"key:{key} value:{value}")
                 cropped_img = base64_to_pil(value["data"])
 
         image_path = folder_paths.get_annotated_filepath(image)
-        # filename = image.rsplit('.', 1)[0]  # get image name
         img = node_helpers.pillow(Image.open, image_path)
         output_images = []
         w, h = None, None
@@ -177,8 +83,10 @@ class IToolsCropImage:
         else:
             output_image = output_images[0]
         try:
-            result = [cropped_img]
-            return pil2tensor(result)
+            if cropped_img is not None:
+                result = [cropped_img]
+                return pil2tensor(result)
+            return (output_image,)
         except Exception as e:
             return (output_image,)
 

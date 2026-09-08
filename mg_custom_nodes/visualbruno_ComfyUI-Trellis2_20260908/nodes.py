@@ -334,12 +334,26 @@ def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=Fal
         torch.cat(uvw_list) if return_uvw else None
     )    
 
+def check_pixal3d_mv_pipeline(pipeline):
+    """
+    The multi-view conditioning only lines up with the *_mv denoisers.
+
+    Feeding it to the single-view checkpoints silently produces garbage rather
+    than an error, so refuse it here: the pipeline has to have been loaded with
+    pixal3d_multiview on (pipeline_mv.json).
+    """
+    if not getattr(pipeline, 'isPixal3DMV', False):
+        raise Exception(
+            'pixal3d_mv_views needs the Pixal3D multi-view weights. Turn on '
+            '"pixal3d_multiview" in Trellis2 - LoadModel (loads pipeline_mv.json / ckpts/*_mv).')
+
+
 class Trellis2LoadModel:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "modelname": (["microsoft/TRELLIS.2-4B","visualbruno/TRELLIS.2-4B-FP8","TencentARC/Pixal3D-T"],{"default":"microsoft/TRELLIS.2-4B"}),
+                "modelname": (["microsoft/TRELLIS.2-4B","visualbruno/TRELLIS.2-4B-FP8","TencentARC/Pixal3D"],{"default":"microsoft/TRELLIS.2-4B"}),
                 "backend": (["flash_attn","xformers","sdpa","flash_attn_3"],{"default":"flash_attn"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -347,6 +361,7 @@ class Trellis2LoadModel:
                 "conv_backend": (["spconv","torchsparse","flex_gemm"],{"default":"flex_gemm"}),
                 "sparse_backend": (["xformers","flash_attn"],{"default":"flash_attn"}),
                 "use_reconviagen": ("BOOLEAN",{"default":False}),
+                "pixal3d_multiview": ("BOOLEAN",{"default":False,"tooltip":"Pixal3D only: load the multi-view denoisers (pipeline_mv.json / ckpts/*_mv) instead of the single-view ones"}),
                 #"naf_chunk_size":(["None","144","208","272","336","400","464","528","592","656","720","784","848","912","976","1024"],{"default":"None"}),
             }
         }
@@ -357,7 +372,7 @@ class Trellis2LoadModel:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, modelname, backend, device, low_vram, keep_models_loaded, conv_backend, sparse_backend, use_reconviagen):    
+    def process(self, modelname, backend, device, low_vram, keep_models_loaded, conv_backend, sparse_backend, use_reconviagen, pixal3d_multiview = False):
         import requests
         
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
@@ -384,7 +399,18 @@ class Trellis2LoadModel:
                 local_dir=model_path,
                 local_dir_use_symlinks=False,
             )
-        
+        elif pixal3d_multiview and not os.path.exists(os.path.join(model_path,'pipeline_mv.json')):
+            # A Pixal3D folder downloaded before the multi-view release has no
+            # pipeline_mv.json / ckpts/*_mv. snapshot_download skips what is already
+            # there, so this only pulls the missing multi-view files.
+            print(f"Multi-view weights missing in {model_path}, downloading them ...")
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=modelname,
+                local_dir=model_path,
+                local_dir_use_symlinks=False,
+            )
+
         reconviagen_pipeline_file = os.path.join(folder_paths.models_dir,'microsoft','TRELLIS.2-4B','reconviagen_pipeline.json')
         if not os.path.exists(reconviagen_pipeline_file):
             source_reconviagen_pipeline_file = os.path.join(script_directory,'reconviagen_pipeline.json')
@@ -440,7 +466,7 @@ class Trellis2LoadModel:
             else:
                 raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
         
-        if use_reconviagen and modelname == 'TencentARC/Pixal3D-T':
+        if use_reconviagen and modelname == 'TencentARC/Pixal3D':
             raise Exception('Model TencentARC/Pixal3D-T is not compatible with ReconViaGen')
         
         if use_reconviagen:
@@ -516,10 +542,13 @@ class Trellis2LoadModel:
             use_fp8 = False
         
         isPixal3D = False
-        if modelname == "TencentARC/Pixal3D-T":
+        if modelname == "TencentARC/Pixal3D":
             isPixal3D = True
-        
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded, use_fp8=use_fp8, use_reconviagen=use_reconviagen, isPixal3D = isPixal3D)
+
+        if pixal3d_multiview and not isPixal3D:
+            raise Exception('pixal3d_multiview only applies to TencentARC/Pixal3D')
+
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded, use_fp8=use_fp8, use_reconviagen=use_reconviagen, isPixal3D = isPixal3D, isPixal3DMV = pixal3d_multiview)
         pipeline.low_vram = low_vram
         
         # if naf_chunk_size == "None":
@@ -2295,7 +2324,446 @@ class Trellis2ReconstructMesh:
         mesh_copy.vertices = vertices.to(mesh_copy.device)
         mesh_copy.faces = faces.to(mesh_copy.device) 
                 
-        return (mesh_copy,)   
+        return (mesh_copy,)
+
+def dcx_sample_surface(vertices, faces, num_points, seed=0, chunk=1000000):
+    """Area-weighted surface sampling on the GPU (avoids a pytorch3d dependency).
+
+    DCx consumes a dense surface point cloud rather than a mesh, so this is the
+    bridge between a Trellis2 mesh and dcx_pkg. DCx itself is CPU-only; this is the
+    one GPU stage, and the points are moved to host memory per chunk.
+
+    chunk trades VRAM for nothing much above 1M: sampling 16M points costs +98 MB at
+    1M/chunk vs +772 MB at 8M/chunk, and the small chunk is no slower. The allocation
+    is transient - no VRAM is held once this returns.
+    """
+    tri = vertices[faces.long()]                                       # [F,3,3]
+    areas = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]).norm(dim=1)
+    if float(areas.sum()) <= 0.0:
+        raise ValueError("Mesh has zero total surface area, cannot sample points for DCx.")
+    probs = areas / areas.sum()
+
+    gen = torch.Generator(device=vertices.device).manual_seed(seed)
+    out = []
+    remaining = int(num_points)
+    while remaining > 0:
+        n = min(chunk, remaining)
+        picked = tri[torch.multinomial(probs, n, replacement=True, generator=gen)]
+        u = torch.rand(n, 1, device=vertices.device, generator=gen)
+        w = torch.rand(n, 1, device=vertices.device, generator=gen)
+        flip = (u + w) > 1.0                                           # fold back into the triangle
+        u = torch.where(flip, 1.0 - u, u)
+        w = torch.where(flip, 1.0 - w, w)
+        p = picked[:, 0] + u * (picked[:, 1] - picked[:, 0]) + w * (picked[:, 2] - picked[:, 0])
+        out.append(p.cpu().numpy().astype(np.float32))
+        remaining -= n
+    return np.concatenate(out, axis=0)
+
+def _dcx_radical_inverse_2(k, bits=24):
+    """van der Corput sequence, base 2, vectorised over int64 k."""
+    out = torch.zeros_like(k, dtype=torch.float64)
+    f = 0.5
+    kk = k.clone()
+    for _ in range(bits):
+        out += (kk & 1).to(torch.float64) * f
+        kk = kk >> 1
+        f *= 0.5
+    return out
+
+def dcx_sample_surface_stratified(vertices, faces, num_points, chunk=1000000):
+    """Low-discrepancy surface sampling: deterministic per-triangle budget + Hammersley.
+
+    Random area-weighted sampling leaves Poisson coverage gaps - P(voxel empty) = e^-lambda -
+    and DCx needs consistent coverage, not merely one hit per voxel. Giving each triangle a
+    fixed area-proportional budget and filling it with a Hammersley set removes both the
+    inter-triangle lottery and most of the intra-triangle clumping. Measured on a torus at
+    resolution 512: watertight at 4M points, where random sampling still had holes at 16M.
+
+    Every triangle gets at least one sample, so tiny faces are never skipped; that means the
+    returned count is max(num_points, num_faces) and can exceed the request slightly.
+    """
+    tri = vertices[faces.long()]                                       # [F,3,3]
+    areas = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]).norm(dim=1) * 0.5
+    total = float(areas.sum())
+    if total <= 0.0:
+        raise ValueError("Mesh has zero total surface area, cannot sample points for DCx.")
+
+    n = torch.clamp((areas / total * float(num_points)).floor().to(torch.int64), min=1)
+    offsets = torch.cat([torch.zeros(1, dtype=torch.int64, device=n.device), n.cumsum(0)])
+    total_n = int(offsets[-1])
+
+    out = []
+    for start in range(0, total_n, chunk):
+        end = min(start + chunk, total_n)
+        gidx = torch.arange(start, end, device=vertices.device, dtype=torch.int64)
+        t = torch.searchsorted(offsets, gidx, right=True) - 1          # owning triangle
+        k = gidx - offsets[t]                                          # index within triangle
+        u = ((k.to(torch.float64) + 0.5) / n[t].to(torch.float64)).to(torch.float32)
+        v = _dcx_radical_inverse_2(k).to(torch.float32)
+        su = u.sqrt()                                                  # uniform over the triangle
+        b0, b1, b2 = (1.0 - su), su * (1.0 - v), su * v
+        p = (tri[t, 0] * b0[:, None] + tri[t, 1] * b1[:, None] + tri[t, 2] * b2[:, None])
+        out.append(p.cpu().numpy().astype(np.float32))
+    return np.concatenate(out, axis=0)
+
+def _dcx_fibonacci_dirs(n, device):
+    i = torch.arange(n, dtype=torch.float32, device=device) + 0.5
+    phi = torch.acos(1.0 - 2.0 * i / n)
+    theta = math.pi * (1.0 + 5.0 ** 0.5) * i
+    return torch.stack([torch.sin(phi) * torch.cos(theta),
+                        torch.sin(phi) * torch.sin(theta),
+                        torch.cos(phi)], dim=1)
+
+def dcx_cull_inner_faces(vertices, faces, num_rays=32, chunk=2000000, verbose=True):
+    """Drop faces that cannot be reached from outside the mesh.
+
+    Trellis2 meshes routinely carry internal geometry (hence remove_inner_faces elsewhere in
+    this file). DCx contours whatever surface it is given, so those internal faces come back
+    as an internal shell - and, because sampling is area-weighted, they also steal a large
+    slice of the point budget from the visible surface, which shows up as holes.
+
+    A face is internal when neither of its sides can see infinity. Probing along +/- the face
+    normal first resolves anything convex on the first try; the Fibonacci directions catch the
+    rest. Note this uses ray escape rather than CuMesh's raystab signed distance, because face
+    centroids lie exactly on the surface where the signed distance is ~0 and carries no signal.
+    """
+    tri = vertices[faces.long()]
+    centers = tri.mean(dim=1)
+    normals = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    normals = normals / normals.norm(dim=1, keepdim=True).clamp_min(1e-20)
+    eps = float((vertices.amax(0) - vertices.amin(0)).norm()) * 1e-4
+
+    bvh = CuMesh.remeshing.cuBVH(vertices, faces)
+    num_faces = faces.shape[0]
+    visible = torch.zeros(num_faces, dtype=torch.bool, device=vertices.device)
+
+    directions = [normals, -normals]
+    fib = _dcx_fibonacci_dirs(num_rays, vertices.device)
+    directions += [fib[k].expand(num_faces, 3) for k in range(num_rays)]
+
+    for d in directions:
+        todo = (~visible).nonzero(as_tuple=True)[0]
+        if todo.numel() == 0:
+            break
+        for side in (1.0, -1.0):
+            sub = todo[~visible[todo]]
+            if sub.numel() == 0:
+                break
+            for i in range(0, sub.numel(), chunk):
+                s = sub[i:i + chunk]
+                origin = centers[s] + (side * eps) * normals[s]
+                _, face_id, _ = bvh.ray_trace(origin.contiguous(), d[s].contiguous())
+                visible[s] |= (face_id < 0)                            # -1 == ray escaped
+
+    kept = int(visible.sum())
+    if verbose:
+        print(f"DCx: inner-face cull kept {kept}/{num_faces} faces "
+              f"({100.0 * kept / max(num_faces, 1):.1f}%)")
+    if kept == 0:
+        raise RuntimeError("DCx inner-face cull removed every face; disable cull_inner_faces.")
+    return faces[visible]
+    
+def dcx_orient_faces_old(vertices, faces, src_vertices, src_faces, src_normals, verbose=True):
+    """Give DCx's output a consistent outward winding.
+
+    DCx extracts a NON-manifold zero-level set, so it emits each face with arbitrary
+    winding - measured at 43-44% back-facing. A viewer that culls or lights by winding
+    then draws those triangles dark, which reads as speckled holes even though no
+    geometry is missing. Global propagation can't fix a non-manifold surface, so orient
+    every face independently against the source normal at its closest point.
+    """
+    vt = torch.from_numpy(np.ascontiguousarray(vertices)).cuda()
+    ft = torch.from_numpy(np.ascontiguousarray(faces)).cuda().long()
+    tri = vt[ft]
+    n = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    n = n / n.norm(dim=1, keepdim=True).clamp_min(1e-20)
+    centers = tri.mean(dim=1)
+    del tri
+
+    bvh = CuMesh.remeshing.cuBVH(src_vertices, src_faces)
+    flip = torch.empty(len(centers), dtype=torch.bool, device="cuda")
+    for i in range(0, len(centers), 524288):
+        e = min(i + 524288, len(centers))
+        _, fid, _ = bvh.unsigned_distance(centers[i:e])
+        dots = (n[i:e] * src_normals[fid.long().reshape(-1)]).sum(dim=1)
+        flip[i:e] = dots < 0
+    del bvh, n, centers
+
+    nflip = int(flip.sum())
+    if nflip:
+        ft[flip] = ft[flip][:, [0, 2, 1]]
+    if verbose:
+        print(f"DCx: reoriented {nflip:,} back-facing triangles "
+              f"({100.0*nflip/max(len(faces),1):.1f}%)")
+    return ft.cpu().numpy().astype(np.int64)    
+
+def dcx_orient_faces(vertices, faces, src_vertices, src_faces, resolution, verbose=True):
+    """Give DCx's output a consistent outward winding.
+
+    DCx emits every face with arbitrary winding (~44% back-facing, 24% of adjacent
+    pairs disagreeing), which a culling viewer draws as speckled holes.
+
+    Two ingredients, and both are needed:
+
+    1. PROPAGATION. 'Orient consistently' is 2-colouring over manifold-edge adjacency,
+       solved exactly by doubling the graph (face-as-is vs face-flipped) and taking
+       connected components, so neighbours agree by construction. This is what makes
+       the result smooth; a per-face decision alone leaves ~21% disagreement because
+       the closest-point normal is noisy at thin features.
+
+    2. A PER-PATCH VOTE for each component's global sign. Source normals are by far
+       the better signal when the source winding is self-consistent (a CuMesh remesh
+       is 0.00% inconsistent) - measured 0.22% final disagreement. Ray-stabbing is a
+       poor signal even then: it called that same clean mesh only 47.6% outward.
+       But on a raw Trellis2 voxel mesh the source winding is itself ~24% inconsistent
+       and useless as a reference, so fall back to ray-stab there.
+
+    Feeding DCx a clean manifold mesh also makes its output fully orientable (0.0%
+    non-orientable, vs 16-32% from a raw voxel mesh), so the choice of input matters
+    more than the choice of algorithm.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    faces = np.ascontiguousarray(faces).astype(np.int64)
+    N = len(faces)
+    if N == 0:
+        return faces
+    NV = int(faces.max()) + 1
+
+    de = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]], axis=0)
+    fidx = np.tile(np.arange(N, dtype=np.int64), 3)
+    key = np.sort(de, axis=1)
+    rev = de[:, 0] != key[:, 0]
+    code = key[:, 0].astype(np.int64) * NV + key[:, 1].astype(np.int64)
+    _, inv, cnt = np.unique(code, return_inverse=True, return_counts=True)
+
+    sel = np.flatnonzero(cnt[inv] == 2)                  # manifold edges only
+    sel = sel[np.argsort(inv[sel], kind='stable')]       # pair them up consecutively
+    a, b = fidx[sel[0::2]], fidx[sel[1::2]]
+    # two faces agree across an edge when they traverse it in opposite directions
+    agree = rev[sel[0::2]] != rev[sel[1::2]]
+
+    src = np.concatenate([a, a + N])
+    dst = np.concatenate([np.where(agree, b, b + N), np.where(agree, b + N, b)])
+    graph = coo_matrix((np.ones(len(src), np.int8), (src, dst)), shape=(2 * N, 2 * N))
+    ncomp, lab = connected_components(graph, directed=False)
+
+    # is the source winding self-consistent enough to be an orientation reference?
+    sf = src_faces.detach().cpu().numpy().astype(np.int64)
+    sNV = int(sf.max()) + 1
+    sde = np.concatenate([sf[:, [0, 1]], sf[:, [1, 2]], sf[:, [2, 0]]], axis=0)
+    skey = np.sort(sde, axis=1)
+    srev = sde[:, 0] != skey[:, 0]
+    scode = skey[:, 0].astype(np.int64) * sNV + skey[:, 1].astype(np.int64)
+    _, sinv, scnt = np.unique(scode, return_inverse=True, return_counts=True)
+    ssel = np.flatnonzero(scnt[sinv] == 2)
+    ssel = ssel[np.argsort(sinv[ssel], kind='stable')]
+    npair = max(len(ssel) // 2, 1)
+    src_bad = float((srev[ssel[0::2]] == srev[ssel[1::2]]).sum()) / npair
+    use_src_normals = src_bad < 0.02
+    del sde, skey, scode, sinv, scnt, ssel
+
+    # per-face preference, used only as a vote within each patch
+    vt = torch.from_numpy(np.ascontiguousarray(vertices)).cuda()
+    ft = torch.from_numpy(faces).cuda()
+    tri = vt[ft]
+    n = torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    n = n / n.norm(dim=1, keepdim=True).clamp_min(1e-20)
+    centers = tri.mean(dim=1)
+    del tri, vt
+
+    bvh = CuMesh.remeshing.cuBVH(src_vertices, src_faces)
+    keep = torch.empty(N, dtype=torch.bool, device="cuda")
+    if use_src_normals:
+        stri = src_vertices[src_faces.long()]
+        sn = torch.linalg.cross(stri[:, 1] - stri[:, 0], stri[:, 2] - stri[:, 0])
+        sn = sn / sn.norm(dim=1, keepdim=True).clamp_min(1e-20)
+        del stri
+        for i in range(0, N, 524288):
+            e = min(i + 524288, N)
+            _, fid, _ = bvh.unsigned_distance(centers[i:e])
+            keep[i:e] = (n[i:e] * sn[fid.long().reshape(-1)]).sum(dim=1) >= 0
+        del sn
+    else:
+        eps = 2.0 / resolution
+        for i in range(0, N, 262144):
+            e = min(i + 262144, N)
+            dp = bvh.signed_distance(centers[i:e] + n[i:e] * eps, mode='raystab')[0].reshape(-1)
+            dm = bvh.signed_distance(centers[i:e] - n[i:e] * eps, mode='raystab')[0].reshape(-1)
+            keep[i:e] = dp >= dm
+    del bvh, n, centers, ft
+    kp = keep.cpu().numpy()
+
+    score = np.zeros(ncomp, dtype=np.int64)
+    np.add.at(score, lab[:N], np.where(kp, 1, -1))
+    np.add.at(score, lab[N:], np.where(kp, -1, 1))
+
+    flip = score[lab[N:]] > score[lab[:N]]
+    out = faces.copy()
+    out[flip] = out[flip][:, [0, 2, 1]]
+
+    if verbose:
+        ref = ("source normals" if use_src_normals
+               else f"ray-stab (source winding {100*src_bad:.0f}% inconsistent, unusable)")
+        unorientable = int((lab[:N] == lab[N:]).sum())
+        msg = (f"DCx: reoriented {int(flip.sum()):,} faces across {ncomp:,} patches "
+               f"using {ref}")
+        if unorientable:
+            msg += (f"; {unorientable:,} faces ({100.0*unorientable/N:.1f}%) are in "
+                    f"non-orientable patches and need double-sided rendering")
+        print(msg)
+    return out
+
+def dcx_extract(points, bbox, resolution, enable_thinning, enable_postprocessing,
+                verbose=True, sampling="stratified"):
+    """Dual Contouring over Expanded Cubes (SIGGRAPH 2026), via the dcx_pkg CPU extension.
+
+    Mirrors the GTUDF path of DCx's evaluate_finetune.mesh_extraction, minus the
+    supplementary-sampling stage (that one needs a UDF query callback).
+    """
+    import dcx_pkg
+
+    voxel_ids, voxel_points, bbox, orders = dcx_pkg.points_to_voxels(
+        points=points, bbox=bbox, res=resolution)
+    density = len(points) / max(len(voxel_ids), 1)
+    if verbose:
+        print(f"DCx: {len(voxel_ids)} occupied voxels ({density:.1f} points/voxel)")
+    # Under-sampling doesn't raise, it just punches holes, so warn loudly. The safe density
+    # depends on how the points were placed: random sampling has Poisson gaps and needs ~25
+    # points per occupied voxel, while a low-discrepancy set is already watertight near 3.
+    need = 25.0 if sampling == "random" else 3.0
+    if density < need * 0.6:
+        print(f"DCx WARNING: only {density:.1f} points per occupied voxel ({sampling} sampling). "
+              f"Expect holes. Raise num_points to "
+              f"~{int(len(voxel_ids) * need / 1e6 + 1) * 1000000:,} for resolution {resolution}"
+              + (", or switch sampling to 'stratified' which needs ~8x fewer points."
+                 if sampling == "random" else "."))
+
+    cube_ids, cube_types = dcx_pkg.get_cube_types(
+        voxel_ids=voxel_ids, voxel_points=voxel_points, orders=orders, res=resolution)
+    if verbose:
+        print(f"DCx: {len(cube_ids)} cubes")
+
+    if enable_thinning:
+        voxel_ids, voxel_points, cube_ids, cube_types = dcx_pkg.thinning(
+            voxel_ids=voxel_ids, voxel_points=voxel_points, cube_ids=cube_ids,
+            cube_types=cube_types, orders=orders, res=resolution)
+        if verbose:
+            print(f"DCx: after thinning {len(voxel_ids)} voxels / {len(cube_ids)} cubes")
+
+    _, vertices, faces = dcx_pkg.reconstruction(
+        voxel_ids=voxel_ids, voxel_points=voxel_points, cube_ids=cube_ids,
+        cube_types=cube_types, orders=orders, res=resolution, pattern=0,
+        enable_postprocessing=enable_postprocessing, dataname="comfyui")
+
+    return np.asarray(vertices, dtype=np.float32), np.asarray(faces, dtype=np.int64)
+
+class Trellis2ReconstructMeshDCx:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "mesh": ("MESHWITHVOXEL",),
+                "resolution": ([128,256,512,1024,1536,2048],{"default":256}),
+                "num_points": ("INT",{"default":4000000, "min":100000, "max":500000000, "step":100000}),
+                "sampling": (["stratified","random"],{"default":"stratified"}),
+                "cull_inner_faces": ("BOOLEAN",{"default":True}),
+                "fix_winding": ("BOOLEAN",{"default":True}),
+                "thinning": ("BOOLEAN",{"default":True}),
+                "postprocessing": ("BOOLEAN",{"default":True}),
+                "remove_floaters": ("BOOLEAN",{"default":True}),
+                "seed": ("INT",{"default":0, "min":0, "max":0x7fffffff}),
+            }
+        }
+
+    RETURN_TYPES = ("MESHWITHVOXEL",)
+    RETURN_NAMES = ("mesh",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, mesh, resolution, num_points, sampling, cull_inner_faces,
+                fix_winding, thinning, postprocessing, remove_floaters, seed):
+        reset_cuda()
+
+        mesh_copy = copy.deepcopy(mesh)
+        device = mesh_copy.device
+
+        vertices = mesh_copy.vertices.cuda()
+        faces = mesh_copy.faces.cuda()
+
+        # DCx expects the shape normalised into a unit box centred on the origin
+        # (see normalized_mesh in DCx/evaluate_finetune.py). Undo it afterwards so
+        # the result stays aligned with the voxel grid for downstream texturing.
+        lo, hi = vertices.amin(dim=0), vertices.amax(dim=0)
+        center = (lo + hi) * 0.5
+        scale = 1.0 / float((hi - lo).max())
+        vertices_norm = (vertices - center) * scale
+
+        print(f'Reconstructing mesh with DCx (res {resolution}, {num_points:,} points, {sampling}) ...')
+
+        if cull_inner_faces:
+            t0 = time.time()
+            faces = dcx_cull_inner_faces(vertices_norm, faces)
+            print(f"DCx: inner-face cull took {time.time()-t0:.2f}s")
+
+        t0 = time.time()
+        if sampling == "stratified":
+            points = dcx_sample_surface_stratified(vertices_norm, faces, num_points)
+        else:
+            points = dcx_sample_surface(vertices_norm, faces, num_points, seed=seed)
+        print(f"DCx: sampled {len(points):,} surface points in {time.time()-t0:.2f}s")
+
+        lo_n, hi_n = vertices_norm.amin(dim=0).cpu().numpy(), vertices_norm.amax(dim=0).cpu().numpy()
+        bbox = np.hstack((lo_n, hi_n)).astype(np.float32)
+
+        t0 = time.time()
+        new_vertices, new_faces = dcx_extract(points, bbox, resolution, thinning,
+                                              postprocessing, sampling=sampling)
+        print(f"DCx: contouring took {time.time()-t0:.2f}s")
+        del points
+
+        if len(new_faces) == 0:
+            raise RuntimeError(
+                "DCx produced an empty mesh. Try raising num_points: the point cloud must be "
+                "dense enough to hit every surface voxel at this resolution.")
+
+        # if fix_winding:
+            # # must run while new_vertices is still in the normalised frame, since the
+            # # BVH is built on vertices_norm
+            # t0 = time.time()
+            # new_faces = dcx_orient_faces(new_vertices, new_faces,
+                                         # vertices_norm, faces, resolution)
+            # print(f"DCx: winding fix took {time.time()-t0:.2f}s")
+        if fix_winding:
+            # must run while new_vertices is still in the normalised frame, since the
+            # BVH is built on vertices_norm
+            t0 = time.time()
+            st = vertices_norm[faces.long()]
+            sn = torch.linalg.cross(st[:, 1] - st[:, 0], st[:, 2] - st[:, 0])
+            sn = sn / sn.norm(dim=1, keepdim=True).clamp_min(1e-20)
+            del st
+            new_faces = dcx_orient_faces_old(new_vertices, new_faces,
+                                         vertices_norm, faces, sn)
+            del sn
+            print(f"DCx: winding fix took {time.time()-t0:.2f}s")            
+
+        # back into the original frame
+        new_vertices = new_vertices / scale + center.cpu().numpy()
+
+        if remove_floaters:
+            new_vertices, new_faces = remove_floater2(new_vertices, new_faces)
+
+        new_vertices = torch.from_numpy(np.ascontiguousarray(new_vertices)).float()
+        new_faces = torch.from_numpy(np.ascontiguousarray(new_faces)).int()
+
+        print(f"After reconstruction: {len(new_vertices)} vertices, {len(new_faces)} faces")
+
+        mesh_copy.vertices = new_vertices.to(device)
+        mesh_copy.faces = new_faces.to(device)
+
+        return (mesh_copy,)
 
 class Trellis2ReconstructMeshWithQuad:
     @classmethod
@@ -2353,7 +2821,7 @@ class Trellis2MeshTexturing:
                 "texture_guidance_strength": ("FLOAT",{"default":3.00,"min":0.00,"max":99.99,"step":0.01}),
                 "texture_guidance_rescale": ("FLOAT",{"default":0.20,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}), 
-                "resolution": ([512,1024,1536],{"default":1024}),
+                "resolution": ([512,1024,1536,2048],{"default":1024}),
                 "texture_size": ("INT",{"default":4096,"min":512,"max":16384}),
                 "texture_alpha_mode": (["OPAQUE","MASK","BLEND"],{"default":"OPAQUE"}),
                 "double_side_material": ("BOOLEAN",{"default":False}), 
@@ -2431,7 +2899,7 @@ class Trellis2MeshTexturingMultiView:
                 "texture_guidance_strength": ("FLOAT",{"default":3.00,"min":0.00,"max":99.99,"step":0.01}),
                 "texture_guidance_rescale": ("FLOAT",{"default":0.20,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}), 
-                "resolution": ([512,1024,1536],{"default":1024}),
+                "resolution": ([512,1024,1536,2048],{"default":1024}),
                 "texture_size": ("INT",{"default":4096,"min":512,"max":16384}),
                 "texture_alpha_mode": (["OPAQUE","MASK","BLEND"],{"default":"OPAQUE"}),
                 "double_side_material": ("BOOLEAN",{"default":False}), 
@@ -3007,7 +3475,7 @@ class Trellis2TrimeshToMeshWithVoxel:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "resolution": ([512,1024],{"default":1024}),
+                "resolution": ([512,1024,1536,2048],{"default":1024}),
             },
         }
 
@@ -4034,7 +4502,8 @@ class Trellis2SparseGenerator:
             },
             "optional":{
                 "image":("IMAGE",),
-                "moge_camera_config":("MOGE_CAM_CONFIG",)
+                "moge_camera_config":("MOGE_CAM_CONFIG",),
+                "pixal3d_mv_views":("PIXAL3D_MV_VIEWS",)
             }
         }
 
@@ -4063,8 +4532,9 @@ class Trellis2SparseGenerator:
         dino_foundation_cap,
         keep_only_shell,
         image = None,
-        moge_camera_config = None
-        ):               
+        moge_camera_config = None,
+        pixal3d_mv_views = None
+        ):
         self.seed_all(seed)
         
         sparse_structure_guidance_interval = [sparse_structure_guidance_interval_start,sparse_structure_guidance_interval_end]        
@@ -4075,31 +4545,44 @@ class Trellis2SparseGenerator:
         pipeline.sparse_structure_sampler = getattr(samplers, f"Flow{sparse_sampler_prefix}GuidanceIntervalSampler")(**args['sparse_structure_sampler']['args'])
 
         if pipeline.isPixal3D:
-            if image is not None:
-                images = tensor_batch_to_pil_list(image, max_views=16)                
-                images = list(images)
-            else:
-                raise Exception('Image is required for Pixal3D')
-                
-            if moge_camera_config is not None:
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-            else:
-                raise Exception('MoGe Camera Config is required for Pixal3D')
+            if pixal3d_mv_views is not None:
+                check_pixal3d_mv_pipeline(pipeline)
 
-            image_cond_model = pipeline.load_pixal3d_image_cond_ss()            
-        
-            image_cond = pipeline.get_proj_cond_ss(
-                image=images,
-                camera_angle_x=camera_angle_x,
-                distance=distance,
-                mesh_scale=mesh_scale,
-                image_cond_model=image_cond_model
-            )
-            
-            if not pipeline.keep_models_loaded:
-                pipeline.unload_pixal3d_image_cond_ss()
+                image_cond_model = pipeline.load_pixal3d_mv_image_cond_ss()
+
+                image_cond = pipeline.get_proj_cond_ss_mv(
+                    pixal3d_mv_views,
+                    image_cond_model=image_cond_model
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_mv_image_cond_ss()
+            else:
+                if image is not None:
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    images = list(images)
+                else:
+                    raise Exception('Image is required for Pixal3D')
+
+                if moge_camera_config is not None:
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+                else:
+                    raise Exception('MoGe Camera Config is required for Pixal3D')
+
+                image_cond_model = pipeline.load_pixal3d_image_cond_ss()
+
+                image_cond = pipeline.get_proj_cond_ss(
+                    image=images,
+                    camera_angle_x=camera_angle_x,
+                    distance=distance,
+                    mesh_scale=mesh_scale,
+                    image_cond_model=image_cond_model
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_image_cond_ss()
                 
         pipeline.load_sparse_structure_model()
         
@@ -4156,7 +4639,8 @@ class Trellis2ShapeGenerator:
             {
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
-            }    
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("SHAPE_SLAT", "INT", "TRELLIS2PIPELINE",)
@@ -4179,43 +4663,56 @@ class Trellis2ShapeGenerator:
         dino_substeps,
         dino_foundation_cap,
         image = None,
-        moge_camera_config = None
+        moge_camera_config = None,
+        pixal3d_mv_views = None
         ):
-            
-        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]        
-        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}            
-        
+
+        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]
+        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}
+
         args = pipeline._pretrained_args
         shape_sampler_prefix = pipeline.GetSamplerName(shape_sampler)
-        pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])                    
-        
+        pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])
+
         if resolution == 512:
             pipeline.unload_shape_slat_flow_model_1024()
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_512()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, coords,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_shape_512()
                 else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_shape_512()
-                    
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_shape_512()
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_shape_512()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_shape_512()
             
             pipeline.load_shape_slat_flow_model_512()
             
@@ -4235,29 +4732,41 @@ class Trellis2ShapeGenerator:
             pipeline.unload_shape_slat_flow_model_512()            
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, coords,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_shape_1024()
                 else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()               
-                    
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_shape_1024()
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_shape_1024()
             
             pipeline.load_shape_slat_flow_model_1024()
             
@@ -4303,7 +4812,8 @@ class Trellis2ShapeCascadeGenerator:
             {
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
-            }              
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("SHAPE_SLAT","INT","TRELLIS2PIPELINE","INT",)
@@ -4326,23 +4836,24 @@ class Trellis2ShapeCascadeGenerator:
         dino_substeps,
         dino_foundation_cap,
         image = None,
-        moge_camera_config = None
+        moge_camera_config = None,
+        pixal3d_mv_views = None
         ):
-            
-        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]        
-        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}                    
-        
+
+        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]
+        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}
+
         args = pipeline._pretrained_args
         shape_sampler_prefix = pipeline.GetSamplerName(shape_sampler)
         pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])
-        slat, hr_resolution, num_tokens = self.sample(pipeline, shape_slat, from_resolution, to_resolution, sparse_structure_resolution, max_num_tokens, image_cond, shape_slat_sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config)
+        slat, hr_resolution, num_tokens = self.sample(pipeline, shape_slat, from_resolution, to_resolution, sparse_structure_resolution, max_num_tokens, image_cond, shape_slat_sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config, pixal3d_mv_views)
         
         if not pipeline.keep_models_loaded:
             pipeline.unload_shape_slat_flow_model_1024()              
         
         return (slat, hr_resolution, pipeline, num_tokens,)         
         
-    def sample(self, pipeline, slat, lr_resolution, resolution, sparse_structure_resolution, max_num_tokens, cond, sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config):
+    def sample(self, pipeline, slat, lr_resolution, resolution, sparse_structure_resolution, max_num_tokens, cond, sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config, pixal3d_mv_views = None):
         # Upsample       
         pipeline.load_shape_slat_decoder()
         if pipeline.low_vram:
@@ -4382,32 +4893,45 @@ class Trellis2ShapeCascadeGenerator:
                 break
                 
         if pipeline.isPixal3D:
-            images = tensor_batch_to_pil_list(image, max_views=16)
-            image_in = images[0] if len(images) == 1 else images        
-            
-            if isinstance(image_in, (list, tuple)):
-                images = list(image_in)
-            else:
-                images = [image_in]
-                
-            camera_angle_x = moge_camera_config['camera_angle_x']
-            distance = moge_camera_config['distance']
-            mesh_scale = moge_camera_config['mesh_scale']
-            
-            image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
-                
             actual_grid_res = hr_resolution // 16
-                
-            cond = pipeline.get_proj_cond_shape(
-                image_cond_model, images, coords,
-                camera_angle_x=camera_angle_x,
-                distance=distance,
-                mesh_scale=mesh_scale,
-                grid_resolution_override=actual_grid_res,
-            )
-            
-            if not pipeline.keep_models_loaded:
-                pipeline.unload_pixal3d_image_cond_shape_1024()
+
+            if pixal3d_mv_views is not None:
+                check_pixal3d_mv_pipeline(pipeline)
+
+                image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_1024()
+
+                cond = pipeline.get_proj_cond_shape_mv(
+                    image_cond_model, pixal3d_mv_views, coords,
+                    grid_resolution_override=actual_grid_res,
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_mv_image_cond_shape_1024()
+            else:
+                images = tensor_batch_to_pil_list(image, max_views=16)
+                image_in = images[0] if len(images) == 1 else images
+
+                if isinstance(image_in, (list, tuple)):
+                    images = list(image_in)
+                else:
+                    images = [image_in]
+
+                camera_angle_x = moge_camera_config['camera_angle_x']
+                distance = moge_camera_config['distance']
+                mesh_scale = moge_camera_config['mesh_scale']
+
+                image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
+
+                cond = pipeline.get_proj_cond_shape(
+                    image_cond_model, images, coords,
+                    camera_angle_x=camera_angle_x,
+                    distance=distance,
+                    mesh_scale=mesh_scale,
+                    grid_resolution_override=actual_grid_res,
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_image_cond_shape_1024()
         
         pipeline.load_shape_slat_flow_model_1024()
         flow_model = pipeline.models['shape_slat_flow_model_1024']
@@ -4476,7 +5000,8 @@ class Trellis2TexSlatGenerator:
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
                 "from_resolution": ("INT",),
-            }            
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("TEXTURE_SLAT", "TRELLIS2PIPELINE",)
@@ -4500,7 +5025,8 @@ class Trellis2TexSlatGenerator:
         dino_foundation_cap,
         image = None,
         moge_camera_config = None,
-        from_resolution = None
+        from_resolution = None,
+        pixal3d_mv_views = None
         ):
 
         texture_guidance_interval = [texture_guidance_interval_start,texture_guidance_interval_end]
@@ -4529,32 +5055,45 @@ class Trellis2TexSlatGenerator:
                 pipeline.unload_tex_slat_flow_model_512()            
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
-                else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_tex_1024()
-                
                 tex_grid_res = from_resolution // 16
-                
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, shape_slat.coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                    grid_resolution_override=tex_grid_res,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_tex_1024()
+
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_tex_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, shape_slat.coords,
+                        grid_resolution_override=tex_grid_res,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_tex_1024()
+                else:
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_tex_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, shape_slat.coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                        grid_resolution_override=tex_grid_res,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_tex_1024()
             
             pipeline.load_tex_slat_flow_model_1024()
             
@@ -7441,6 +7980,352 @@ class Trellis2SelectImagesForMultiView:
         return (front_image, back_image, left_image, right_image, )
         
         
+def comfy_images_to_rgba_pils(images, masks=None, invert_mask=False, remove_background=False,
+                              max_views=16):
+    """
+    Turn a ComfyUI IMAGE batch into the RGBA PIL views the Pixal3D MV path expects.
+
+    Alpha is taken, in order of preference, from an explicit MASK input, from the
+    image's own alpha channel, or from rembg. The views are never cropped or
+    rescaled here: transforms.json describes the framing as given, so changing it
+    would break the correspondence between the pixels and the cameras.
+    """
+    if not isinstance(images, torch.Tensor):
+        raise TypeError(f"Expected torch.Tensor for IMAGE, got {type(images)}")
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+    if images.ndim != 4:
+        raise ValueError(f"Unsupported IMAGE tensor shape: {tuple(images.shape)}")
+
+    V = min(int(images.shape[0]), int(max_views))
+    if V < int(images.shape[0]):
+        print(f"[Pixal3D MV] Warning: {images.shape[0]} views given, using the first {V}")
+
+    if masks is not None:
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        if masks.shape[0] != images.shape[0]:
+            raise ValueError(
+                f"got {images.shape[0]} images but {masks.shape[0]} masks")
+
+    out = []
+    for i in range(V):
+        img = images[i]
+        alpha = None
+
+        if masks is not None:
+            alpha = masks[i].detach().cpu().float().clamp(0, 1)
+            if invert_mask:
+                alpha = 1.0 - alpha
+            if alpha.shape != img.shape[:2]:
+                alpha = F.interpolate(
+                    alpha[None, None], size=tuple(img.shape[:2]),
+                    mode='bilinear', align_corners=False)[0, 0]
+        elif img.shape[-1] == 4:
+            a = img[..., 3].detach().cpu().float().clamp(0, 1)
+            # A fully opaque alpha channel counts as no mask, as in preprocess_image.
+            if not torch.all(a >= 254.0 / 255.0):
+                alpha = a
+
+        rgb = img[..., :3].detach().cpu().float().clamp(0, 1)
+        pil = Image.fromarray((rgb.numpy() * 255.0).astype(np.uint8), mode='RGB')
+
+        if alpha is None:
+            if not remove_background:
+                raise ValueError(
+                    f"view {i} has no alpha channel and no mask. Give it a MASK, an "
+                    f"RGBA image, or turn remove_background on.")
+            from rembg import remove
+            pil = remove(pil).convert('RGBA')
+        else:
+            pil = pil.convert('RGBA')
+            pil.putalpha(Image.fromarray((alpha.numpy() * 255.0).astype(np.uint8), mode='L'))
+
+        out.append(pil)
+
+    return out
+
+
+def pixal3d_views_to_preview(views):
+    """The alpha-premultiplied 512px views, as a ComfyUI IMAGE batch, for previewing."""
+    size = min(views['images'].keys())
+    return views['images'][size][0].permute(0, 2, 3, 1).contiguous().cpu()
+
+
+class Trellis2Pixal3DMultiViewConfig:
+    """
+    Build the Pixal3D multi-view conditioning bundle from a batch of posed views.
+
+    The first image is the MAIN view and its pose must be the canonical front view
+    (azimuth 0, elevation 0), because every other view is placed relative to it.
+    Azimuth / elevation follow the same convention as
+    Trellis2RenderMultiViewNvdiffrast: 0/90/180/270 -> front/left/back/right, and
+    positive elevation is above the object.
+
+    fov / distance / mesh_scale describe the camera the views were SHOT with, and
+    the views are never cropped or rescaled here, so they have to match how the
+    images are actually framed. Getting the distance wrong scales the whole
+    projection: at 10% too near, the surface of the model samples the background
+    instead of itself, which shows up as washed-out texture long before the mesh
+    suffers. `framing` picks how the distance is derived:
+
+      auto         measure the object in the alpha channel and fit the distance to
+                   it. Works whatever the margin is; the default.
+      pixal3d_rig  the rig the multi-view weights were trained on, 10% margin
+                   (the shipped example: fov 20 deg, distance 3.1192).
+      fill_frame   object touches the frame edges. This is what
+                   Trellis2PreProcessImage produces and what
+                   Trellis2FovMoGeCameraConfig assumes, so it is right for views
+                   you cropped yourself and wrong for raw renders.
+      camera_config  take the distance from the wired moge_camera_config.
+
+    A distance widget above 0 always wins. A wired moge_camera_config supplies fov
+    and mesh_scale; its distance is only used by framing = camera_config.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "azimuths": ("STRING", {"default": "0,90,180,270"}),
+                "elevations": ("STRING", {"default": "0,0,0,0"}),
+                "fov": ("FLOAT", {"default": 20.0, "min": 0.001, "max": 179.999, "step": 0.001}),
+                "fov_unit": (["deg", "rad"], {"default": "deg"}),
+                "mesh_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 9.9, "step": 0.1}),
+                "distance": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 99.99, "step": 0.0001,
+                                       "tooltip": "0 = derive it from `framing`. Above 0 always wins."}),
+                "remove_background": ("BOOLEAN", {"default": False}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+                "framing": (["auto", "pixal3d_rig", "fill_frame", "camera_config"],
+                            {"default": "auto",
+                             "tooltip": "How to derive the camera distance. auto = fit it to the "
+                                        "object in the alpha channel; pixal3d_rig = the 10% margin "
+                                        "the MV weights were trained on; fill_frame = object touches "
+                                        "the frame edges (what Trellis2PreProcessImage produces)."}),
+            },
+            "optional": {
+                "masks": ("MASK",),
+                "moge_camera_config": ("MOGE_CAM_CONFIG",),
+            }
+        }
+
+    RETURN_TYPES = ("PIXAL3D_MV_VIEWS", "MOGE_CAM_CONFIG", "IMAGE",)
+    RETURN_NAMES = ("pixal3d_mv_views", "moge_camera_config", "preview",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, images, azimuths, elevations, fov, fov_unit, mesh_scale, distance,
+                remove_background, invert_mask, framing="auto", masks=None,
+                moge_camera_config=None):
+        from .trellis2.utils import mv_camera
+
+        az_list = Trellis2ImagesToViewConfigs()._parse_angles(azimuths)
+        el_list = Trellis2ImagesToViewConfigs()._parse_angles(elevations)
+        if not az_list or not el_list:
+            raise Exception("azimuths and elevations are required")
+        if len(az_list) != len(el_list):
+            raise Exception("azimuths and elevations must have the same amount of values")
+
+        if moge_camera_config is not None:
+            # A wired camera supplies the lens; the distance is settled below, since
+            # its own distance assumes the single-view path's cropped framing.
+            camera_angle_x = float(moge_camera_config['camera_angle_x'])
+            mesh_scale = float(moge_camera_config.get('mesh_scale', 1.0))
+        else:
+            camera_angle_x = float(fov) if fov_unit == "rad" else math.radians(float(fov))
+
+        pils = comfy_images_to_rgba_pils(
+            images, masks=masks, invert_mask=invert_mask,
+            remove_background=remove_background, max_views=len(az_list),
+        )
+        if len(pils) != len(az_list):
+            raise Exception(
+                f"got {len(pils)} images but {len(az_list)} azimuth/elevation pairs")
+
+        fill = mv_camera.measure_object_fill(pils)
+        fill_frame = mv_camera.camera_distance_for_fov(camera_angle_x, mesh_scale)
+        print(f"[Pixal3D MV] views fill {100 * fill:.1f}% of the frame "
+              f"(fill_frame distance would be {fill_frame:.4f})")
+
+        if distance > 0:
+            print(f"[Pixal3D MV] framing: distance {distance:.4f} set explicitly")
+        elif framing == "auto":
+            distance = mv_camera.camera_distance_for_extent(
+                camera_angle_x, fill * 512 / 2, mesh_scale)
+            print(f"[Pixal3D MV] framing=auto: distance {distance:.4f} fitted to the views")
+        elif framing == "pixal3d_rig":
+            distance = fill_frame * mv_camera.PIXAL3D_RIG_MARGIN
+            print(f"[Pixal3D MV] framing=pixal3d_rig: distance {distance:.4f} "
+                  f"({mv_camera.PIXAL3D_RIG_MARGIN}x fill_frame, the trained 10% margin)")
+        elif framing == "fill_frame":
+            distance = fill_frame
+            print(f"[Pixal3D MV] framing=fill_frame: distance {distance:.4f}")
+        elif framing == "camera_config":
+            if moge_camera_config is None:
+                raise Exception("framing=camera_config needs a moge_camera_config input")
+            distance = float(moge_camera_config['distance'])
+            print(f"[Pixal3D MV] framing=camera_config: distance {distance:.4f}")
+        else:
+            raise Exception(f"unknown framing {framing!r}")
+
+        # The projection scales with distance, so a mismatch here quietly makes every
+        # grid point sample the wrong pixel -- loudest in the texture stage.
+        fitted = mv_camera.camera_distance_for_extent(camera_angle_x, fill * 512 / 2, mesh_scale)
+        if abs(distance - fitted) / fitted > 0.03:
+            print(f"[Pixal3D MV] Warning: distance {distance:.4f} does not match how the views "
+                  f"are framed ({fitted:.4f} would). The projection is off by "
+                  f"{100 * abs(distance - fitted) / fitted:.1f}%, which washes out the texture. "
+                  f"Try framing=auto.")
+
+        views = mv_camera.build_views_from_angles(
+            pils, az_list, el_list, camera_angle_x,
+            mesh_scale=mesh_scale, distance=distance,
+        )
+        mv_camera.check_main_view(views)
+
+        cam_config = {'camera_angle_x': camera_angle_x,
+                      'distance': float(distance),
+                      'mesh_scale': float(mesh_scale)}
+
+        return (views, cam_config, pixal3d_views_to_preview(views),)
+
+
+class Trellis2Pixal3DLoadMultiViewFolder:
+    """
+    Load a Pixal3D multi-view input folder (the inference_mv.py format).
+
+        <folder_path>/
+            transforms.json     mesh_scale + per-frame file_path / transform_matrix
+            view00_azim000.png  RGBA alpha is used as the mask when present
+            ...
+
+    transform_matrix is a 4x4 camera-to-world in the Blender/NeRF convention (Z-up
+    world, each camera looking along its own -Z with its own +Y up) and
+    camera_angle_x is the horizontal fov in radians, given per frame or once at the
+    top level. Frame 0 is the main view.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "folder_path": ("STRING", {"default": ""}),
+                "num_views": ("INT", {"default": 0, "min": 0, "max": 64,
+                                      "tooltip": "0 = every frame in transforms.json"}),
+                "remove_background": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("PIXAL3D_MV_VIEWS", "MOGE_CAM_CONFIG", "IMAGE",)
+    RETURN_NAMES = ("pixal3d_mv_views", "moge_camera_config", "preview",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, folder_path, num_views, remove_background):
+        from .trellis2.utils import mv_camera
+
+        if not os.path.isdir(folder_path):
+            raise Exception(f"Folder not found: {folder_path}")
+        if not os.path.exists(os.path.join(folder_path, 'transforms.json')):
+            raise Exception(f"No transforms.json in {folder_path}")
+
+        rembg = None
+        if remove_background:
+            from rembg import remove
+            rembg = lambda im: remove(im.convert('RGB'))
+
+        views = mv_camera.load_views_from_dir(
+            folder_path,
+            num_views=None if num_views <= 0 else int(num_views),
+            rembg=rembg,
+        )
+        mv_camera.check_main_view(views)
+
+        cam_config = {'camera_angle_x': float(views['camera_angle_x'][0, 0]),
+                      'distance': float(views['camera_distance'][0, 0]),
+                      'mesh_scale': float(views['mesh_scale'])}
+
+        return (views, cam_config, pixal3d_views_to_preview(views),)
+        
+class Trellis2SelectImagesForPixal3DMultiView:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "firstimage": ("STRING",{"default":""}),
+                "preprocess": ("BOOLEAN",{"default":False}),
+                "padding": ("INT",{"default":0,"min":0,"max":1024}),
+                "remove_background": ("BOOLEAN",{"default":False}),
+                "max_size": ("INT",{"default":2048,"min":512,"max":8192,"step":128}),
+                "azimuths": ("STRING",{"default":"0"}),
+                "elevations": ("STRING", {"default":"0"}),
+            },
+            "optional":{
+                "secondimage": ("STRING",{"default":""}),
+                "thirdimage": ("STRING",{"default":""}),
+                "fourthimage": ("STRING",{"default":""})
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING",)
+    RETURN_NAMES = ("images", "azimuths", "elevations",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+
+    def load_view(self, path):
+        """Resolve a path (absolute, or relative to the ComfyUI input dir) to an IMAGE tensor."""
+        if path is None or str(path).strip() == '':
+            return None
+
+        path = str(path).strip()
+        if not os.path.exists(path):
+            path = os.path.join(folder_paths.get_input_directory(), path)
+            if not os.path.exists(path):
+                return None
+
+        image = Image.open(path)
+        image = image.convert("RGBA" if 'A' in image.getbands() else "RGB")
+        return pil2tensor(image)
+
+    def process(self, firstimage, preprocess, padding, remove_background, max_size, azimuths, elevations, secondimage = None, thirdimage = None, fourthimage = None):
+
+        first_image = self.load_view(firstimage)
+        second_image = self.load_view(secondimage)
+        third_image = self.load_view(thirdimage)
+        fourth_image = self.load_view(fourthimage)
+
+        if first_image is None:
+            raise ValueError(f"Trellis2SelectImagesForPixal3DMultiView: could not find firstimage image '{firstimage}'")
+
+        allimages = []
+
+        if preprocess:
+            t2preprocess = Trellis2PreProcessImage()
+
+            # process() is a ComfyUI node function: it returns a 1-tuple, so unwrap it.
+            if first_image is not None:
+                first_image = t2preprocess.process(first_image, padding, remove_background, max_size)[0]                
+            if second_image is not None:
+                second_image = t2preprocess.process(second_image, padding, remove_background, max_size)[0]
+            if third_image is not None:
+                third_image = t2preprocess.process(third_image, padding, remove_background, max_size)[0]
+            if fourth_image is not None:
+                fourth_image = t2preprocess.process(fourth_image, padding, remove_background, max_size)[0]
+
+        if first_image is not None:
+            allimages.append(first_image)
+        if second_image is not None:
+            allimages.append(second_image)
+        if third_image is not None:
+            allimages.append(third_image)
+        if fourth_image is not None:
+            allimages.append(fourth_image)
+        
+        output_images = torch.cat(allimages, dim=0)
+
+        return (output_images, azimuths, elevations, )        
+
 NODE_CLASS_MAPPINGS = {
     "Trellis2LoadModel": Trellis2LoadModel,
     "Trellis2MeshWithVoxelGenerator": Trellis2MeshWithVoxelGenerator,
@@ -7473,6 +8358,7 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2MeshTexturingMultiView": Trellis2MeshTexturingMultiView,
     "Trellis2WeldVertices": Trellis2WeldVertices,
     "Trellis2ReconstructMeshWithQuad": Trellis2ReconstructMeshWithQuad,
+    "Trellis2ReconstructMeshDCx": Trellis2ReconstructMeshDCx,
     "Trellis2StringSelector": Trellis2StringSelector,
     "Trellis2FillHolesWithCuMesh": Trellis2FillHolesWithCuMesh,
     "Trellis2LaplacianSmoothingWithOpen3d": Trellis2LaplacianSmoothingWithOpen3d,
@@ -7516,6 +8402,9 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2SelectImagesForMultiView": Trellis2SelectImagesForMultiView,
     "Trellis2SmoothMeshWithPyMeshlab": Trellis2SmoothMeshWithPyMeshlab,
     "Trellis2SmoothTrimeshWithPyMeshlab": Trellis2SmoothTrimeshWithPyMeshlab,
+    "Trellis2Pixal3DMultiViewConfig": Trellis2Pixal3DMultiViewConfig,
+    "Trellis2Pixal3DLoadMultiViewFolder": Trellis2Pixal3DLoadMultiViewFolder,
+    "Trellis2SelectImagesForPixal3DMultiView": Trellis2SelectImagesForPixal3DMultiView,
     }
     
 
@@ -7551,6 +8440,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2MeshTexturingMultiView": "Trellis2 - Mesh Texturing Multi-View",
     "Trellis2WeldVertices": "Trellis2 - Weld Vertices",
     "Trellis2ReconstructMeshWithQuad": "Trellis2 - Reconstruct Mesh With Quad",
+    "Trellis2ReconstructMeshDCx": "Trellis2 - Reconstruct Mesh (DCx)",
     "Trellis2StringSelector": "Trellis2 - String Selector",
     "Trellis2FillHolesWithCuMesh": "Trellis2 - Fill Holes with CuMesh",
     "Trellis2LaplacianSmoothingWithOpen3d": "Trellis2 - Laplacian Smoothing (using open3d)",
@@ -7594,4 +8484,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2SelectImagesForMultiView": "Trellis2 - Select Images For MultiView",
     "Trellis2SmoothMeshWithPyMeshlab": "Trellis2 - Smooth Mesh With PyMeshlab",
     "Trellis2SmoothTrimeshWithPyMeshlab": "Trellis2 - Smooth Trimesh With PyMeshlab",
+    "Trellis2Pixal3DMultiViewConfig": "Trellis2 - Pixal3D MultiView Config",
+    "Trellis2Pixal3DLoadMultiViewFolder": "Trellis2 - Pixal3D Load MultiView Folder",
+    "Trellis2SelectImagesForPixal3DMultiView": "Trellis2 - Select Images For Pixal3D MultiView",
     }

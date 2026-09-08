@@ -1035,7 +1035,7 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("RESPONSE",)
     FUNCTION = "process"
-    CATEGORY = "QwenVL-Mod/QwenVL"
+    CATEGORY = "QwenVL-Mod"
 
     def process(
         self,
@@ -1119,7 +1119,7 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("RESPONSE",)
     FUNCTION = "process"
-    CATEGORY = "QwenVL-Mod/QwenVL"
+    CATEGORY = "QwenVL-Mod"
 
     def process(
         self,
@@ -1176,6 +1176,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AILab_QwenVL_GGUF": "QwenVL-Mod (GGUF)",
-    "AILab_QwenVL_GGUF_Advanced": "QwenVL-Mod Advanced (GGUF)",
+    "AILab_QwenVL_GGUF": "🔷 QwenVL-Mod (GGUF)",
+    "AILab_QwenVL_GGUF_Advanced": "🔷 QwenVL-Mod Advanced (GGUF)",
 }

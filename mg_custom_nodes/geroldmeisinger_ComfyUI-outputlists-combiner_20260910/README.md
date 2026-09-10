@@ -57,6 +57,7 @@ If you find this custom node useful:
 	- [XYZ-GridPlot](#xyz-gridplot)
 	- [Load Any File](#load-any-file)
 	- [Load Any Video](#load-any-video)
+	- [Path OutputList](#path-outputlist)
 	- [Iterate Begin](#iterate-begin)
 	- [Iterate End](#iterate-end)
 	- [Bake String](#bake-string)
@@ -139,6 +140,7 @@ Newer Skia versions requires `libEGL.so` to be present on Linux hosts, see [offi
 
 # Changelog
 
+- 0.0.19 fixed file glob limit in Load Any File, cleanup node promotion
 - 0.0.15 added Bake String node
 - 0.0.14 restructed Spreadsheet OutputList, deprecated Formatted String in favor of Comfy Core Format Text
 - 0.0.13 fixed nested Iterate loop nodes
@@ -437,6 +439,8 @@ Internally uses python's [glob.iglob](https://docs.python.org/3/library/glob.htm
 
 `metadata` calls `exiftool`, if it's installed and available at `PATH`, otherwise uses `PIL.Image.info` as a fallback.
 
+If you need more control over the paths use it together with `Path OutputList`.
+
 For security reason only the following directories are supported: `[input] [output] [temp]`.
 For performance reasons the number of files are limited to: 1024.
 
@@ -463,7 +467,7 @@ For performance reasons the number of files are limited to: 1024.
 (ComfyUI workflow included)
 
 This node is a duplicate of nodes_video.py LoadVideo except with the fix included from [issue#11017](https://github.com/comfyanonymous/ComfyUI/issues/11017)
-It is required to load videos based on annotated filepaths which are restricted to user directories.
+It is required to load videos based on annotated filepaths which are restricted to user directories: `[input] [output] [temp]`..
 
 ### Inputs
 
@@ -476,6 +480,45 @@ It is required to load videos based on annotated filepaths which are restricted 
 | Name | Type | Description |
 | --- | --- | --- |
 | `None` | `VIDEO` |  |
+
+## Path OutputList
+
+![Path OutputList](/web/docs/PathOutputList/PathOutputList.png)
+
+(ComfyUI workflow included)
+
+List directory content via glob patterns and split each filepath into it's parts.
+
+`filepath` supports ComfyUI's annotated filepaths `[input]` `[output]` or `[temp]`.
+`filepath` also support glob-pattern expansions `subdir/**/*.png`.
+Internally uses python's [glob.iglob](https://docs.python.org/3/library/glob.html#glob.iglob).
+
+`bare_strings` is intended for different styles of path recombinations, e.g. "{fulldir}/{basename}.{ext}" vs "{fulldir}{basename}{ext}"
+
+As a design choice the ComfyUI user directory annotation is used in the glob pattern (to allow more flexible patterns) insted of providing a separate variable (in a combo box).
+
+### Inputs
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `glob` | `STRING` | Glob-pattern expansion `subdir/**/*.png` to list directory content. Base directory defaults to `[input]` user-directory. Use suffix ` [input]` ` [output]` or ` [temp]` (mind the leading whitespace!) to specify a different ComfyUI user-directory. |
+| `limit` | `INT` | Limit maximum number of paths to collect (-1.. unlimited) |
+| `bare_strings` | `BOOLEAN` | Decides if path-parts only contain the bare strings versus safe OS compliant definitions, e.g. if True `ext` is `png` vs `.png`, `full_dir` is `examples/animals` vs `examples/animals/`, and `parent_dir` may be a empty string vs `./`. Note that `rel_dir` always defaults to `.` |
+
+### Outputs
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `filepath+` | `* 𝌠` | Full filepath (relative to a ComfyUI directory) including annotations. Recommended if you want to be specific and adhere to ComfyUI's path notation.<br>e.g. `examples/animals/myfile.png [input]` |
+| `filepath` | `STRING 𝌠` | Full filepath (relative to a ComfyUI directory) without annotations. Recommended if you only load files from input directory anways.<br>e.g. `examples/animals/myfile.png` |
+| `filename` | `STRING 𝌠` | Full filename<br>e.g. `myfile.png` |
+| `basename` | `STRING 𝌠` | Basename part of the file without extension<br>e.g. `myfile` |
+| `ext` | `STRING 𝌠` | Extension. Note that hidden-files (e.g. `.bashrc`) are considered files without a extension.<br>`png` if `bare_strings=True` else `.png` |
+| `full_dir` | `STRING 𝌠` | Full directory of the file (relative to a ComfyUI directory)<br>e.g. `examples/animals` if `bare_strings=True` else `examples/animals/` (note the trailing slash) |
+| `parent_dir` | `STRING 𝌠` | Immediate parent directory of the file<br>e.g. `animals` or empty for empty parent if `bare_strings=True` else `./` |
+| `annotation` | `STRING 𝌠` | Annotation to reference the ComfyUI user directory<br>`input` if `bare_strings=True` else ` [input]` (note the leading whitespace) |
+| `index` | `INT 𝌠` | Range of 0..count. You can use this as an index. |
+| `count` | `INT` | Total number of files. |
 
 ## Iterate Begin
 
@@ -822,11 +865,11 @@ Here you can see that the string `dog` is baked into the `override` field.
 
 ## Bake values into flexible workflows
 
-This workflow lets you use the same workflow to either re-generate the individual image or the original workflow for all images. FOr example when generating a XYZ GridPlot you want know which parameter was used for an individual image but also re-generate the whole grid again.
+This workflow lets you use the same workflow to either re-generate the individual image or the original workflow for all images. For example when generating a XYZ GridPlot you want know which parameter was used for an individual image but also re-generate the whole grid again.
 
 ![Bake String in XYZ GridPlot before](/workflows/advanced/BakeStringXYZGridPlotSupergrids_0.png)
 
-This workflow is an expansion of [bake values into workflows]](#bake-values-into-workflows) and the [XYZ GridPlot](#xyz-gridplot). Makes use of an `Bake String` node for the whole workflow (the outer) and one `Bake String` for the iterated workflow (the inner in `Iterate Begin -> worklfow -> Iterate End`). To check if this workflow is baked or not the outer `Bake String.is_override` is used together with a `If/Else Switch` to either use the original list (not baked) or use only one item (baked), which will be overriden by the sub-sequent inner `Bake String`. Hence, if the workflow is not baked, the list items will be used as is, otherwise the list collapses to one item which gets overriden by the inner string and only executes once. Because the downstream nodes for `XYZ GridPlot` don't make sense for a single item we block further execution with a `Execution Blocker` based on the outer `Bake String.is_override`.
+This workflow is an expansion of [bake values into workflows](#bake-values-into-workflows) and the [XYZ GridPlot](#xyz-gridplot). Makes use of an `Bake String` node for the whole workflow (the outer) and one `Bake String` for the iterated workflow (the inner in `Iterate Begin -> worklfow -> Iterate End`). To check if this workflow is baked or not the outer `Bake String.is_override` is used together with a `If/Else Switch` to either use the original list (not baked) or use only one item (baked), which will be overriden by the sub-sequent inner `Bake String`. Hence, if the workflow is not baked, the list items will be used as is, otherwise the list collapses to one item which gets overriden by the inner string and only executes once. Because the downstream nodes for `XYZ GridPlot` don't make sense for a single item we block further execution with a `Execution Blocker` based on the outer `Bake String.is_override`.
 
 When you drag an individual output image into the workspace you get the following:
 
@@ -1147,7 +1190,7 @@ Also note that most loop nodes want to support some form of feedback cycle and u
 **Alternative loop variants**
 
 * [KJTensorLoop pullrequest](https://github.com/kijai/ComfyUI/blob/2bf117a8257a3a1351d7f8db55a9f2ade8870277/comfy_extras/nodes_looping.py)
-* [rattus128 Generic Loops I](https://github.com/Comfy-Org/ComfyUI/pull/15923) [Generic Loops II](https://github.com/Comfy-Org/ComfyUI/pull/15999) ([code1](https://github.com/rattus128/ComfyUI/blob/9334c13639d854e9034d5f119213c40106747f8c/comfy_extras/nodes_loop.py)
+* [rattus128 Generic Loops I](https://github.com/Comfy-Org/ComfyUI/pull/15923) [Generic Loops II](https://github.com/Comfy-Org/ComfyUI/pull/15999) ([code1](https://github.com/rattus128/ComfyUI/blob/9334c13639d854e9034d5f119213c40106747f8c/comfy_extras/nodes_loop.py) [code2](https://github.com/rattus128/ComfyUI/blob/01b89ce6194283756a19c9ba075e7638e108194d/comfy_extras/nodes_loop.py))
 * [Execution Inversion Demo](https://github.com/BadCafeCode/execution-inversion-demo-comfyui) ([code1](https://github.com/BadCafeCode/execution-inversion-demo-comfyui/blob/main/flow_control.py) [code2](https://github.com/BadCafeCode/execution-inversion-demo-comfyui/blob/main/utility_nodes.py))
 * [Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) ([code](https://github.com/yolain/ComfyUI-Easy-Use/blob/4de1ab3b66e48da916b6f263bacd001df53a2720/py/nodes/logic.py#L591))
 * [Inspire-Pack](https://github.com/ltdrdata/ComfyUI-Inspire-Pack) ([Hidden example](https://github.com/ltdrdata/ComfyUI-Impact-Pack/issues/824#issuecomment-2493301831)) ([code](https://github.com/ltdrdata/ComfyUI-Inspire-Pack/blob/d23db9aa544de9a6d4c609cb7005fa9e0d42031d/inspire/list_nodes.py#L82))
@@ -1518,7 +1561,7 @@ When you open the node searchbox and filter by types you often stumble upon list
 * Documentation: is generated from /readme via a pytest `test_generate_docs.py` (it's akward, I know, but I get the ComfyUI API in code this way).
 * Debugging: launch ComfyUI via [vscode launch](/.vscode/launch.json) and then just set breakpoints in code.
 * Filestructure: I put this repo as a symlink in `ComfyUI/custom_nodes`. This lets me keep the files separate while still allowing me to start it with Comfy. Also I can `comfy-cli node publish` within my Comfy installation.
-* Code style: I use [Elastic Tabstops Redux for vscode](https://marketplace.visualstudio.com/items?itemName=gerold-meisinger.elastic-tabstops-lite-redux).
+* Code style: I use [Elastic Tabstops Redux for vscode](https://marketplace.visualstudio.com/items?itemName=gerold-meisinger.elastic-tabstops-lite-redux). There are `git filter clean` which can be added with `git config --local filter.removeAlignmentSpaces.clean '"elastic-tabstops -r"'`.
 
 ## Tools
 

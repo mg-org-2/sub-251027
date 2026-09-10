@@ -4,6 +4,7 @@ import io
 import json
 import time
 import mimetypes
+import collections.abc
 from comfy_api.latest import io as comfy_api_io
 from comfy_api.latest import InputImpl, Types
 from comfy_execution.graph_utils import ExecutionBlocker
@@ -305,7 +306,7 @@ class basicIn_Boolean:
 
 
 
-class basicIn_INOUT:
+class basicIn_img_INOUT:
     CATEGORY = "Apt_Preset/IO_Port"
 
     @classmethod
@@ -322,6 +323,294 @@ class basicIn_INOUT:
 
     def pass_through(self, image=None):
         return (image,)
+
+
+class basicIn_media:
+    CATEGORY = "Apt_Preset/IO_Port"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media": ("IMAGE,VIDEO,AUDIO,LATENT,STRING,ARRAY",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE,VIDEO,AUDIO,LATENT,STRING,ARRAY",)
+    RETURN_NAMES = ("media",)
+    FUNCTION = "pass_through"
+    DESCRIPTION = "将多个素材整理为一条可供多个节点共享的 Media 扎线。"
+
+    def pass_through(self, media=None):
+        return (media,)
+
+
+_MEDIA_UNPACK_MAX_INPUTS = 64
+_MEDIA_UNPACK_TAG_RE = re.compile(
+    r"(?:<\s*)?(picture|image|video|audio|图片|图像|视频|音频)\s*#?\s*(\d+)(?:\s*>)?",
+    re.IGNORECASE,
+)
+_MEDIA_UNPACK_SEGMENT_RE = re.compile(
+    r"(?:^|\n)\s*(?:#segment\s*\d+\s*-+|【\s*Segment\s+\d+\s*】)\s*",
+    re.IGNORECASE,
+)
+
+
+def _media_unpack_kind(value, declared=""):
+    kind = str(declared or "").strip().lower()
+    if kind in {"batch", "text"}:
+        return "text"
+    if kind in {"image_batch", "image", "video", "audio"}:
+        return "image" if kind == "image_batch" else kind
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, collections.abc.Mapping) and "waveform" in value:
+        return "audio"
+    if hasattr(value, "get_components"):
+        return "video"
+    if isinstance(value, torch.Tensor) and value.ndim == 4:
+        return "image"
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        return "text"
+    return ""
+
+
+def _media_unpack_texts(value):
+    values = value if isinstance(value, (list, tuple)) else [value]
+    texts = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        parts = [part.strip() for part in _MEDIA_UNPACK_SEGMENT_RE.split(item) if part.strip()]
+        texts.extend(parts or [item])
+    return texts
+
+
+class basicIn_media_unpack:
+    CATEGORY = "Apt_Preset/IO_Port"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "media": ("IMAGE,VIDEO,AUDIO,STRING,ARRAY",),
+        }
+        for index in range(1, _MEDIA_UNPACK_MAX_INPUTS + 1):
+            optional[f"media_{index}"] = ("IMAGE,VIDEO,AUDIO,STRING,ARRAY", {"lazy": True})
+            optional[f"media_type_{index}"] = ("STRING", {"default": ""})
+        return {
+            "required": {
+                "output_index": ("INT", {"default": 1, "min": 1, "max": 5000, "step": 1}),
+                "shot_mode": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "开启后按文本分段索引输出该段实际引用的素材",
+                }),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("VIDEO", "STRING", "IMAGE", "AUDIO")
+    RETURN_NAMES = ("index_video", "index_text", "index_image", "index_audio")
+    FUNCTION = "unpack"
+    DESCRIPTION = "按分类序号解包 Media；分镜模式按所选文本段中的素材标签输出。"
+
+    def check_lazy_status(self, output_index, shot_mode=False, media=None, **kwargs):
+        selected = max(0, int(output_index) - 1)
+        inputs = []
+        for index in range(1, _MEDIA_UNPACK_MAX_INPUTS + 1):
+            name = f"media_{index}"
+            kind = _media_unpack_kind(kwargs.get(name), kwargs.get(f"media_type_{index}"))
+            if kind:
+                inputs.append((name, kind, kwargs.get(name)))
+
+        if not shot_mode:
+            required = []
+            for kind in ("video", "text", "image", "audio"):
+                matches = [item for item in inputs if item[1] == kind]
+                if selected < len(matches) and matches[selected][2] is None:
+                    required.append(matches[selected][0])
+            return required
+
+        text_inputs = [item for item in inputs if item[1] == "text"]
+        missing_text = [name for name, _kind, value in text_inputs if value is None]
+        if missing_text:
+            return missing_text
+        texts = []
+        for _name, _kind, value in text_inputs:
+            texts.extend(_media_unpack_texts(value))
+        if selected >= len(texts):
+            return []
+        aliases = {
+            "picture": "image", "image": "image", "图片": "image", "图像": "image",
+            "video": "video", "视频": "video", "audio": "audio", "音频": "audio",
+        }
+        references = {}
+        for match in _MEDIA_UNPACK_TAG_RE.finditer(texts[selected]):
+            references.setdefault(aliases[match.group(1).lower()], int(match.group(2)) - 1)
+        required = []
+        for kind, ordinal in references.items():
+            matches = [item for item in inputs if item[1] == kind]
+            if 0 <= ordinal < len(matches) and matches[ordinal][2] is None:
+                required.append(matches[ordinal][0])
+        return required
+
+    @staticmethod
+    def _collect(media=None, **kwargs):
+        items = []
+        if media is not None:
+            items.append((media, _media_unpack_kind(media)))
+        for index in range(1, _MEDIA_UNPACK_MAX_INPUTS + 1):
+            value = kwargs.get(f"media_{index}")
+            declared = kwargs.get(f"media_type_{index}")
+            kind = _media_unpack_kind(value, declared)
+            if kind:
+                items.append((value, kind))
+        grouped = {"video": [], "text": [], "image": [], "audio": []}
+        for value, kind in items:
+            if kind == "text":
+                grouped["text"].extend(_media_unpack_texts(value))
+            elif kind in grouped:
+                grouped[kind].append(value)
+        return grouped
+
+    def unpack(self, output_index, shot_mode=False, media=None, **kwargs):
+        grouped = self._collect(media, **kwargs)
+        selected = max(0, int(output_index) - 1)
+        blocker = lambda: ExecutionBlocker(None)
+
+        if not shot_mode:
+            return tuple(
+                grouped[kind][selected] if selected < len(grouped[kind]) else blocker()
+                for kind in ("video", "text", "image", "audio")
+            )
+
+        if selected >= len(grouped["text"]):
+            return tuple(blocker() for _ in range(4))
+        text = grouped["text"][selected]
+        references = {}
+        aliases = {
+            "picture": "image", "image": "image", "图片": "image", "图像": "image",
+            "video": "video", "视频": "video", "audio": "audio", "音频": "audio",
+        }
+        for match in _MEDIA_UNPACK_TAG_RE.finditer(text):
+            kind = aliases[match.group(1).lower()]
+            references.setdefault(kind, int(match.group(2)) - 1)
+        valid = {
+            kind: grouped[kind][index]
+            for kind, index in references.items()
+            if 0 <= index < len(grouped[kind])
+        }
+        if not valid:
+            return tuple(blocker() for _ in range(4))
+        return (
+            valid.get("video", blocker()),
+            text,
+            valid.get("image", blocker()),
+            valid.get("audio", blocker()),
+        )
+
+
+class basicIn_OptionalPass:
+    CATEGORY = "Apt_Preset/IO_Port"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "any_input": (ANY_TYPE, {"lazy": True}),
+            }
+        }
+
+    RETURN_TYPES = (ANY_TYPE,)
+    RETURN_NAMES = ("any_output",)
+    FUNCTION = "pass_through"
+    DESCRIPTION = "未连接时输出空值；连接时惰性加载并原样传递输入。下游节点需要支持空值。"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, input_types):
+        return True
+
+    def check_lazy_status(self, **kwargs):
+        if "any_input" in kwargs and kwargs["any_input"] is None:
+            return ["any_input"]
+        return []
+
+    def pass_through(self, any_input=None):
+        return (any_input,)
+
+
+class basicIn_Media_Params:
+    CATEGORY = "Apt_Preset/IO_Port"
+
+    MODES = (
+        "Hunyuan-Video",
+        "Wan2.x",
+        "LTX-2",
+        "CogVideoX-1.5",
+        "MiniMax-H3",
+        "Flux2",
+        "SDXL",
+    )
+
+    TEMPORAL_RULES = {
+        "Hunyuan-Video": (4, 1),
+        "Wan2.x": (4, 1),
+        "LTX-2": (8, 1),
+        "CogVideoX-1.5": (8, 1),
+        "MiniMax-H3": (17, 5),
+    }
+
+    ASPECT_RATIOS = {
+        "1:1（正方形）": (1, 1),
+        "2:3（竖版照片）": (2, 3),
+        "3:2（横版照片）": (3, 2),
+        "3:4（竖版标准）": (3, 4),
+        "4:3（横版标准）": (4, 3),
+        "9:16（竖屏）": (9, 16),
+        "16:9（横屏）": (16, 9),
+        "21:9（超宽屏）": (21, 9),
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": (list(cls.MODES), {
+                    "default": "MiniMax-H3",
+                }),
+                "size_multiple": ("INT", {
+                    "default": 32,
+                    "min": 4,
+                    "max": 1024,
+                    "step": 4,
+                    "tooltip": "宽高尺寸的整除倍率。",
+                }),
+                "aspect_ratio": (list(cls.ASPECT_RATIOS), {"default": "1:1（正方形）"}),
+                "megapixels": ("FLOAT", {"default": 0.6, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "time_s": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 3600.0, "step": 0.1}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0}),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "FLOAT")
+    RETURN_NAMES = ("width", "height", "length", "fps")
+    FUNCTION = "calculate"
+    DESCRIPTION = "按模型模式、画面比例、像素量、时长和帧率计算图像或视频基础参数。"
+
+    def calculate(self, mode, size_multiple, aspect_ratio, megapixels, time_s, fps):
+        multiple = int(size_multiple)
+        ratio_width, ratio_height = self.ASPECT_RATIOS[aspect_ratio]
+        scale = math.sqrt(float(megapixels) * 1024 * 1024 / (ratio_width * ratio_height))
+        width = max(multiple, round(ratio_width * scale / multiple) * multiple)
+        height = max(multiple, round(ratio_height * scale / multiple) * multiple)
+        frame_count = max(1, round(float(time_s) * float(fps)))
+        temporal_rule = self.TEMPORAL_RULES.get(mode)
+        if temporal_rule is None:
+            length = frame_count
+        else:
+            frame_multiple, frame_offset = temporal_rule
+            frame_count = max(frame_offset, frame_count)
+            length = frame_count + (frame_offset - frame_count % frame_multiple) % frame_multiple
+        return width, height, length, float(fps)
 
 
 #endregion-----------------基本输入-----------------
@@ -411,169 +700,6 @@ class view_combo:     # web_node/view_Data_text.js
         rows = lines[start_index:end_index]
 
         return (rows, rows)
-
-
-
-
-class IO_node_Script:
-    def __init__(self):
-        self.node_list = []
-        self.custom_node_list = []
-        self.update_node_list()
-
-    def update_node_list(self):
-        try:
-            import nodes
-            self.node_list = []
-            self.custom_node_list = []
-            
-            for node_name, node_class in nodes.NODE_CLASS_MAPPINGS.items():
-                try:
-                    module = inspect.getmodule(node_class)
-                    module_path = getattr(module, '__file__', '')
-                    is_custom = 'custom_nodes' in module_path
-
-                    node_info = {
-                        'name': node_name,
-                        'class_name': node_class.__name__,
-                        'category': getattr(node_class, 'CATEGORY', 'Uncategorized'),
-                        'description': getattr(node_class, 'DESCRIPTION', ''),
-                        'is_custom': is_custom
-                    }
-                    
-                    self.node_list.append(node_info)
-                    if is_custom:
-                        self.custom_node_list.append(node_info)
-                except Exception as e:
-                    logging.error(f"Error processing node {node_name}: {str(e)}")
-                    continue
-            
-            self.node_list.sort(key=lambda x: x['name'])
-            self.custom_node_list.sort(key=lambda x: x['name'])
-            
-        except Exception as e:
-            logging.error(f"Error updating node list: {str(e)}")
-            traceback.print_exc()
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        try:
-            import nodes
-            node_names = sorted(list(nodes.NODE_CLASS_MAPPINGS.keys()))
-            if not node_names:
-                node_names = ["No nodes found"]
-                
-            return {
-                "required": {
-                    "selected_node": (node_names, {
-                        "default": node_names[0]
-                    }),
-                    "search": ("STRING", {
-                        "default": "",
-                        "multiline": False
-                    }),
-                    "show_all": ("BOOLEAN", {
-                        "default": True,
-                        "label": "Show All Nodes"
-                    }),
-                    "refresh_list": ("BOOLEAN", {
-                        "default": False,
-                        "label": "Refresh Node List"
-                    })
-                }
-            }
-        except Exception as e:
-            print(f"Error in INPUT_TYPES: {str(e)}")
-            return {
-                "required": {
-                    "search": ("STRING", {"default": "", "multiline": False}),
-                    "show_all": ("BOOLEAN", {"default": True, "label": "Show All Nodes"}),
-                    "refresh_list": ("BOOLEAN", {"default": False, "label": "Refresh Node List"})
-                }
-            }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("node_source",)
-    FUNCTION = "find_script"
-    CATEGORY = "Apt_Preset/IO_Port"
-    NAME = "IO_node_Script"
-
-    def get_node_source_code(self, node_name):
-        try:
-            import nodes
-            import inspect
-            import os
-
-            node_class = nodes.NODE_CLASS_MAPPINGS.get(node_name)
-            if not node_class:
-                return f"Node '{node_name}' not found"
-
-            module = inspect.getmodule(node_class)
-            if not module:
-                return f"Could not find module for {node_name}"
-
-            try:
-                file_path = inspect.getfile(module)
-            except TypeError:
-                return f"Could not determine file path for {node_name}"
-
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_content = f.read()
-            except Exception as e:
-                return f"Error reading file: {str(e)}"
-
-            class_def = f"class {node_class.__name__}:"
-            class_start = file_content.find(class_def)
-            
-            if class_start == -1:
-                return f"Could not find class definition for {node_name}"
-
-            lines = file_content[class_start:].split('\n')
-            class_lines = []
-            indent_level = None
-
-            for line in lines:
-                if indent_level is None:
-                    if line.strip().startswith('class'):
-                        indent_level = len(line) - len(line.lstrip())
-                    continue
-
-                current_indent = len(line) - len(line.lstrip())
-                if current_indent <= indent_level and line.strip():
-                    break
-
-                class_lines.append(line)
-
-            source_output = f"=== Node: {node_name} ===\n"
-            source_output += f"File: {file_path}\n\n"
-            source_output += "=== Source Code ===\n"
-            source_output += "\n".join(class_lines)
-
-            return source_output
-
-        except Exception as e:
-            return f"Error retrieving source code: {str(e)}"
-
-    def find_script(self, selected_node, search, show_all, refresh_list):
-        try:
-            if refresh_list:
-                self.update_node_list()
-
-            if selected_node:
-                source_code = self.get_node_source_code(selected_node)
-                return (source_code,)
-            return ("Please select a node to view its source code",)
-
-        except Exception as e:
-            logging.error(f"Error in find_script: {str(e)}")
-            traceback.print_exc()
-            return (traceback.format_exc(),)
-
-
-
-
-
 
 
 
@@ -3011,7 +3137,7 @@ async def apt_preset_io_load_media_preview(request):
 async def apt_preset_io_load_media_upload(request):
     media_type = str(request.query.get("media_type", "")).lower().strip()
     if media_type == "audio":
-        allowed_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
+        allowed_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".wma"}
     else:
         allowed_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
@@ -5143,37 +5269,14 @@ class view_node_Script:
                 return f"Could not determine file path for {node_name}"
 
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_content = f.read()
-            except Exception as e:
-                return f"Error reading file: {str(e)}"
-
-            class_def = f"class {node_class.__name__}:"
-            class_start = file_content.find(class_def)
-            
-            if class_start == -1:
-                return f"Could not find class definition for {node_name}"
-
-            lines = file_content[class_start:].split('\n')
-            class_lines = []
-            indent_level = None
-
-            for line in lines:
-                if indent_level is None:
-                    if line.strip().startswith('class'):
-                        indent_level = len(line) - len(line.lstrip())
-                    continue
-
-                current_indent = len(line) - len(line.lstrip())
-                if current_indent <= indent_level and line.strip():
-                    break
-
-                class_lines.append(line)
+                class_source = inspect.getsource(node_class)
+            except (OSError, TypeError) as e:
+                return f"Could not read source for {node_name}: {str(e)}"
 
             source_output = f"=== Node: {node_name} ===\n"
             source_output += f"File: {file_path}\n\n"
             source_output += "=== Source Code ===\n"
-            source_output += "\n".join(class_lines)
+            source_output += class_source
 
             return source_output
 

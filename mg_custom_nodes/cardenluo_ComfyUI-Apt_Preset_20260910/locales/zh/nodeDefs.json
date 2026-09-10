@@ -14184,6 +14184,25 @@
     }
   },
 
+"basicIn_Media_Params": {
+"display_name": "basicIn_媒体参数",
+"inputs": {
+"aspect_ratio": {
+"name": "画面比例"
+},
+"megapixels": {
+"name": "百万像素"
+},
+"multiple": {
+"name": "整除倍数"
+},
+"time_s": {
+"name": "时长 (秒)"
+}
+},
+"outputs": {
+}
+},
 
   "csv_write_data": {
     "display_name": "CSV_写入数据",

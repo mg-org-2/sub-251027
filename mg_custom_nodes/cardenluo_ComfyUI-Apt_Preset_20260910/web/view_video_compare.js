@@ -38,11 +38,12 @@ function createCompareUI(node) {
     for (const video of [videoA, videoB]) {
         video.playsInline = true;
         video.preload = "metadata";
-        video.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#080808;";
+        // Some browsers expose <video> through a native compositing layer that
+        // consumes drag gestures before the parent DOM widget can see them.
+        video.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#080808;pointer-events:none;";
         stage.appendChild(video);
     }
     videoB.muted = true;
-    videoB.style.pointerEvents = "none";
 
     const divider = document.createElement("div");
     divider.style.cssText = "position:absolute;z-index:3;background:#fff;box-shadow:0 0 5px #000;pointer-events:none;";
@@ -92,7 +93,7 @@ function createCompareUI(node) {
 
     let split = 50;
     let direction = "左右";
-    let dragging = false;
+    let dragPointerId = null;
     let syncing = false;
 
     const applySplit = () => {
@@ -138,19 +139,45 @@ function createCompareUI(node) {
         node.setDirtyCanvas?.(true, true);
     };
 
+    const stopPointerEvent = (event) => {
+        if (event.cancelable) event.preventDefault();
+        event.stopPropagation();
+    };
+
+    const finishSplitDrag = (event) => {
+        if (dragPointerId === null) return;
+        if (event?.pointerId != null && event.pointerId !== dragPointerId) return;
+        const pointerId = dragPointerId;
+        dragPointerId = null;
+        try {
+            if (stage.hasPointerCapture?.(pointerId)) stage.releasePointerCapture(pointerId);
+        } catch {
+            // Window-level pointer listeners are the compatibility fallback.
+        }
+        if (event) stopPointerEvent(event);
+    };
+
+    const moveSplitDrag = (event) => {
+        if (dragPointerId === null || event.pointerId !== dragPointerId) return;
+        stopPointerEvent(event);
+        setSplitFromPointer(event);
+    };
+
     stage.addEventListener("pointerdown", (event) => {
-        dragging = true;
-        stage.setPointerCapture(event.pointerId);
+        if (event.isPrimary === false || (event.pointerType === "mouse" && event.button !== 0)) return;
+        dragPointerId = event.pointerId;
+        stopPointerEvent(event);
+        try {
+            stage.setPointerCapture?.(event.pointerId);
+        } catch {
+            // Older Safari/WebViews may expose PointerEvent without capture.
+        }
         setSplitFromPointer(event);
     });
-    stage.addEventListener("pointermove", (event) => {
-        if (dragging) setSplitFromPointer(event);
-    });
-    stage.addEventListener("pointerup", (event) => {
-        dragging = false;
-        stage.releasePointerCapture(event.pointerId);
-    });
-    stage.addEventListener("pointercancel", () => { dragging = false; });
+    window.addEventListener("pointermove", moveSplitDrag, true);
+    window.addEventListener("pointerup", finishSplitDrag, true);
+    window.addEventListener("pointercancel", finishSplitDrag, true);
+    window.addEventListener("blur", finishSplitDrag, true);
 
     const syncVideoB = (force = false) => {
         if (!Number.isFinite(videoA.currentTime)) return;
@@ -244,6 +271,11 @@ function createCompareUI(node) {
     };
 
     const destroy = () => {
+        finishSplitDrag();
+        window.removeEventListener("pointermove", moveSplitDrag, true);
+        window.removeEventListener("pointerup", finishSplitDrag, true);
+        window.removeEventListener("pointercancel", finishSplitDrag, true);
+        window.removeEventListener("blur", finishSplitDrag, true);
         pauseBoth();
         for (const video of [videoA, videoB]) {
             video.removeAttribute("src");

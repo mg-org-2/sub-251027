@@ -29,6 +29,7 @@ from .NodeBasic.C_latent import *
 from .NodeBasic.C_viewIO import *
 from .NodeBasic.View_video_compare import View_image_compare, View_video_compare
 from .NodeBasic.C_AD import *
+from .NodeBasic.AD_scail2_control import AD_scail2_generate
 from .NodeBasic.C_image import *
 from .NodeBasic.C_promp import *
 from .NodeBasic.C_imgEffect import *
@@ -248,19 +249,22 @@ NODE_CLASS_MAPPINGS= {
 
 
 
-
+"AD_MiniMax_guide": AD_MiniMax_guide,
 "AD_MinMax_Ref2_generate": AD_MinMax_Ref2_generate,
-"AD_MinMax_FL2_generate": AD_MinMax_FL2_generate,
 "AD_MinMax_Ref2_generate_refine": AD_MinMax_Ref2_generate_refine,
 
+"AD_Media_editor": AD_Media_editor,
+"AD_scail2_generate": AD_scail2_generate,
 
-"AD_MiniMax_guide": AD_MiniMax_guide,
+"AD_MinMax_FL2_generate": AD_MinMax_FL2_generate,
+
+
 
 
 "AD_sam_Crop": AD_sam_Crop,
 "AD_sam_stitch": AD_sam_stitch,
 "AD_Inject_Latent": AD_Inject_Latent,
-
+"AD_Video_color_grad":AD_Video_color_grad,
 
 
 
@@ -316,7 +320,11 @@ NODE_CLASS_MAPPINGS= {
 "basicIn_Sampler": basicIn_Sampler,
 "basicIn_Seed": basicIn_Seed,
 "basicIn_Boolean": basicIn_Boolean,
-"basicIn_INOUT": basicIn_INOUT,
+"basicIn_img_INOUT": basicIn_img_INOUT,
+"basicIn_media": basicIn_media,
+"basicIn_media_unpack": basicIn_media_unpack,
+"basicIn_OptionalPass": basicIn_OptionalPass,
+"basicIn_Media_Params": basicIn_Media_Params,
 
 
 "IO_LoadImgBatch": IO_LoadImgBatch,
@@ -334,7 +342,6 @@ NODE_CLASS_MAPPINGS= {
 "IO_save_image": IO_save_image, 
 "IO_input_any": IO_input_any,
 "IO_RegexPreset": IO_RegexPreset,
-"IO_node_Script": IO_node_Script,
 "IO_loadLatent": IO_loadLatent,
 "IO_SaveLatent": IO_SaveLatent,
 
@@ -641,7 +648,7 @@ NODE_CLASS_MAPPINGS= {
 "flow_stage_list":flow_stage_list,
 "flow_stage_unpack":flow_stage_unpack,
 "flow_stage_bridge_decode_range":flow_stage_bridge_decode_range,
-"AD_Video_color_grad":AD_Video_color_grad,
+
 
 
 

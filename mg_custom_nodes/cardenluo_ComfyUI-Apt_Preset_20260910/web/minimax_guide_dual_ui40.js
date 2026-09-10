@@ -1,15 +1,21 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 // AD MiniMax Guide frontend.
 
-const AD_GUIDE_UI_VERSION = "2026.09.01-guide-v90-ui40";
-globalThis.__AD_MINIMAX_GUIDE_UI40_MODULE__ = true;
+const AD_GUIDE_UI_VERSION = "2026.09.09-guide-v123-one-pass-tile";
+globalThis.__AD_MINIMAX_GUIDE_UI41_MODULE__ = true;
 console.info(`[ADMiniMaxGuide] frontend ${AD_GUIDE_UI_VERSION} loaded`);
 const NODE_CLASS = "AD_MiniMax_guide";
 const REF2_GENERATE_NODE_CLASS = "AD_MinMax_Ref2_generate";
 const REF2_REFINE_NODE_CLASS = "AD_MinMax_Ref2_generate_refine";
 const FL2_GENERATE_NODE_CLASS = "AD_MinMax_FL2_generate";
 const FLOW_STAGE_BEGIN_CLASS = "flow_stage_begin";
+const MEDIA_RELAY_CLASS = "basicIn_media";
+const MEDIA_EDITOR_CLASS = "AD_Media_editor";
+const MEDIA_RELAY_EVENT = "apt-media-relay-change";
+const MEDIA_RELAY_LINKS_PROP = "apt_media_hub_links";
+const MEDIA_RELAY_TARGETS_PROP = "ad_minimax_guide_media_hubs";
 const LOADER_CLASS = "ADMiniMaxGuideLoader";
 const OUTPUT_CLASS = "ADMiniMaxGuideOutput";
 const LINKS_PROP = "ad_minimax_guide_virtual_media_links";
@@ -30,7 +36,11 @@ const REF_IMAGE_MAX = "max";
 const MAX_MEDIA = 64;
 const MIN_SECONDS = 4;
 const MAX_SECONDS = 20;
+const DEFAULT_STAGE_TIME = 5;
+const MIN_STAGE_TIME = 2;
+const MAX_STAGE_TIME = 15;
 const PROMPT_HISTORY_LIMIT = 120;
+const MEDIA_EDITOR_PREVIEW_TOKEN_LIMIT = 200;
 const SEED_CONTROL_MODES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const PROMPT_UNDO_VERSION = "2026-08-05-editor-undo-shield-v1";
 const CARET_SENTINEL = "\u200B";
@@ -53,10 +63,12 @@ const TEXT = {
     loadAudio: ZH_BROWSER ? "\u52a0\u8f7d\u97f3\u9891" : "Load audio",
     deleteLink: ZH_BROWSER ? "\u5220\u9664" : "Delete",
     promptPlaceholder: "Prompt...",
-    referencePromptPlaceholder: ZH_BROWSER ? "Prompt... \u8f93\u5165 @ \u5f15\u7528\u5df2\u8fde\u63a5\u7d20\u6750" : "Prompt... Type @ to reference connected media",
+    referencePromptPlaceholder: ZH_BROWSER
+        ? "\u53cc\u51fb\u7d20\u6750\uff0c\u53ef\u4ee5\u6dfb\u52a0\u6807\u7b7e\uff0c\n\u53cc\u51fbAuto_text\u81ea\u52a8\u5206\u6bb5\u63d0\u793a\u8bcd\n\u53cc\u51fbAuto_img\u81ea\u52a8\u8ffd\u52a0\u6279\u91cf\u56fe\u7247\n# \u5524\u9192\u624b\u52a8\u8f93\u5165\u683c\u5f0f"
+        : "Double-click media to add a tag.\nDouble-click Auto_text to split prompts.\nDouble-click Auto_img to append batch images.",
     mentionTitle: ZH_BROWSER ? "\u5f15\u7528\u7d20\u6750" : "Reference media",
     mentionEmpty: ZH_BROWSER ? "\u5148\u5c06\u7d20\u6750\u8fde\u63a5\u5230\u4e3b\u8282\u70b9" : "Connect media to the main node first",
-    materialEmpty: ZH_BROWSER ? "\u4ece\u7d20\u6750\u8282\u70b9\u7aef\u53e3\u8fde\u5165\u56fe\u7247\u3001\u89c6\u9891\u6216\u97f3\u9891" : "Connect image, video or audio from a node output",
+    materialEmpty: ZH_BROWSER ? "\u4eceMedia\u8f93\u5165\u56fe\u7247\u3001\u89c6\u9891\u3001\u97f3\u9891\u3001\u6587\u672c" : "Connect images, videos, audio, or text from Media",
     fl2MaterialEmpty: ZH_BROWSER ? "\u4ece\u7d20\u6750\u8282\u70b9\u7aef\u53e3\u8fde\u5165\u56fe\u7247\uff0c\u6bcf\u4e2a\u9636\u6bb5\u6700\u591a\u4f7f\u7528\u4e24\u5f20\u4f5c\u4e3a\u9996\u5c3e\u5e27" : "Connect images; each stage uses up to two as first/last frames",
     mainTitle: "AD MiniMax Guide",
     loaderTitle: ZH_BROWSER ? "AD MiniMax Guide \u52a0\u8f7d\u5668" : "AD MiniMax Guide Loader",
@@ -93,6 +105,37 @@ const TEXT = {
     outputContext: "H3 Context",
     inputMedia: "Media",
 };
+const PROMPT_TAG_OPTIONS = [
+    { label: "主体对象", value: "<Subject X>" },
+    { label: "分镜头", value: "[Shot X] At 00:00.000" },
+    { label: "说话的人", value: "(S1)" },
+    { label: "说中文台词", value: "<d>[Chinese] 写入台词</d>" },
+    { label: "说英文台词", value: "<d>[English] write dialogue</d>" },
+    {
+        label: "六段式框架",
+        value: `subject_definitions:
+@图片1，
+<Subject 1>:
+<Subject 2>:
+
+summary:
+[reference generation] 
+
+retention_analysis:
+<Subject 1> (appears in full video, speaker:S1): fully_preserved
+<Subject 2> (appears in full video): partially_preserved
+@图片1 ([Shot 1] starting frame): weak_reference
+
+detailed_description:
+[Shot 1] At 00:00.000
+[Shot 2] At 00:00.000
+
+
+overall_soundscape:
+
+non_diegetic_music: `,
+    },
+];
 const OPTION_DEFS = {
     mode: {
         [MODE_IMAGE]: ZH_BROWSER ? "\u56fe\u751f\u6216\u9996\u5c3e\u5e27" : "I2V or First/Last Frame",
@@ -207,6 +250,12 @@ const LOADERS = {
 };
 const BATCH_IMAGE_NODE_CLASS = "BatchImagesNode";
 const SPECIAL_MATERIAL_TYPES = new Set(["text", "latent", "batch", "image_batch"]);
+const SUPPORTED_MATERIAL_EXTENSIONS = {
+    image: new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "gif", "bmp"]),
+    video: new Set(["mp4", "mov", "webm", "mkv", "avi", "m4v"]),
+    audio: new Set(["wav", "mp3", "flac", "ogg", "m4a", "aac", "opus", "wma"]),
+    text: new Set(["txt"]),
+};
 
 let installed = false;
 let patchedCanvas = false;
@@ -231,6 +280,18 @@ function isTarget(node) {
     return [NODE_CLASS, REF2_GENERATE_NODE_CLASS, FL2_GENERATE_NODE_CLASS].includes(String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || ""));
 }
 
+function isMediaRelayNode(node) {
+    return [MEDIA_RELAY_CLASS, MEDIA_EDITOR_CLASS].includes(String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || ""));
+}
+
+function isMediaEditorNode(node) {
+    return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === MEDIA_EDITOR_CLASS;
+}
+
+function isMultiPromptNode(node) {
+    return isStagePromptTarget(node) || isMediaEditorNode(node);
+}
+
 function isChxTarget(node) {
     return [REF2_GENERATE_NODE_CLASS, FL2_GENERATE_NODE_CLASS].includes(String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || ""));
 }
@@ -245,6 +306,15 @@ function isRef2RefineTarget(node) {
 
 function isMulTarget(node) {
     return [REF2_GENERATE_NODE_CLASS, FL2_GENERATE_NODE_CLASS].includes(String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || ""));
+}
+
+function isStagePromptTarget(node) {
+    const nodeClass = String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "");
+    return nodeClass === NODE_CLASS || [REF2_GENERATE_NODE_CLASS, FL2_GENERATE_NODE_CLASS].includes(nodeClass);
+}
+
+function isGuideTarget(node) {
+    return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === NODE_CLASS;
 }
 
 function isFl2GenerateTarget(node) {
@@ -396,6 +466,10 @@ function referenceMentionMode(node) {
 
 function ensureLinks(node) {
     node.properties ||= {};
+    if (isMediaEditorNode(node)) {
+        if (!Array.isArray(node.properties[MEDIA_RELAY_LINKS_PROP])) node.properties[MEDIA_RELAY_LINKS_PROP] = [];
+        return node.properties[MEDIA_RELAY_LINKS_PROP];
+    }
     if (!Array.isArray(node.properties[LINKS_PROP])) {
         node.properties[LINKS_PROP] = [];
     }
@@ -437,7 +511,7 @@ function normalizeLinks(node, removeMissing = false) {
     const normalized = [];
     const seen = new Set();
     let hasText = false;
-    const isMultiStage = isMulTarget(node);
+    const isMultiStage = isMultiPromptNode(node);
     for (const link of links) {
         const sourceId = Number(link?.source_id);
         const sourceSlot = Number(link?.source_slot) || 0;
@@ -454,6 +528,7 @@ function normalizeLinks(node, removeMissing = false) {
             const detectedType = getMediaType(getSlotType(source.outputs?.[sourceSlot]), source);
             if (!detectedType) continue;
             mediaType = detectedType;
+            if (!isSupportedMaterialSourceFormat(source, mediaType)) continue;
             if ((mediaType === "text" && (hasText || isMultiStage)) || (["batch", "image_batch"].includes(mediaType) && !isMultiStage)) continue;
         }
         if (mediaType === "batch" && normalized.some((item) => item.media_type === "batch")) continue;
@@ -474,8 +549,9 @@ function normalizeLinks(node, removeMissing = false) {
             || Number(previous.source_slot) !== link.source_slot
             || String(previous.media_type || "image").toLowerCase() !== link.media_type;
     });
-    if (changed) node.properties[LINKS_PROP] = normalized;
-    else if (links.some((link) => !Number.isFinite(Number(link?.order)))) node.properties[LINKS_PROP] = normalized;
+    const linksProp = isMediaEditorNode(node) ? MEDIA_RELAY_LINKS_PROP : LINKS_PROP;
+    if (changed) node.properties[linksProp] = normalized;
+    else if (links.some((link) => !Number.isFinite(Number(link?.order)))) node.properties[linksProp] = normalized;
     resequence(node);
     return ensureLinks(node);
 }
@@ -501,7 +577,7 @@ function mediaLimits(node) {
     if (isFl2Target(node)) {
         return { image: MAX_MEDIA, video: 0, audio: 0, latent: 1, text: 0, batch: 1, image_batch: 1, total: MAX_MEDIA };
     }
-    if (isMulTarget(node)) {
+    if (isMultiPromptNode(node)) {
         return { image: MAX_MEDIA, video: MAX_MEDIA, audio: MAX_MEDIA, latent: 1, text: 0, batch: 1, image_batch: 1, total: MAX_MEDIA };
     }
     return { image: 9, video: 3, audio: 3, latent: 1, text: 1, total: 15 };
@@ -619,11 +695,42 @@ function connectingOutput(canvas) {
 function connectingInput(canvas) {
     const node = canvas?.connecting_node || canvas?.connectingNode;
     const input = canvas?.connecting_input || canvas?.connectingInput;
-    if (!node || !input || !isTarget(node)) return null;
+    if (!node || !input || (!isTarget(node) && !isMediaRelayNode(node))) return null;
     const index = typeof input === "number" ? input : node.inputs?.indexOf(input);
     const slot = node.inputs?.[Number.isFinite(index) ? index : -1];
     if (String(slot?.name || input?.name || "") !== "media") return null;
     return { targetNode: node };
+}
+
+function addMediaRelayLink(relayNode, sourceNode, sourceSlot, sourceType, mediaType = null) {
+    if (!isMediaRelayNode(relayNode) || !sourceNode || isSameNode(relayNode, sourceNode)) return false;
+    const sourceId = Number(sourceNode.id);
+    if (!Number.isFinite(sourceId)) return false;
+    mediaType ||= getMediaType(sourceType, sourceNode);
+    if (!mediaType || !isSupportedMaterialSourceFormat(sourceNode, mediaType)) return false;
+    const links = mediaRelayLinks(relayNode);
+    const exists = links.some((link) => Number(link.source_id) === sourceId && Number(link.source_slot) === Number(sourceSlot));
+    if (exists) return false;
+    if (["batch", "image_batch"].includes(mediaType) && links.some((link) => getMediaType(link.source_type, app.graph?.getNodeById?.(Number(link.source_id))) === mediaType)) return false;
+    links.push({
+        source_id: sourceId,
+        source_slot: Number(sourceSlot) || 0,
+        source_type: sourceType || "*",
+    });
+    normalizeLinks(relayNode);
+    refreshMaterialTray(relayNode);
+    relayNode.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+    app.graph?.change?.();
+    window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(relayNode.id) } }));
+    return true;
+}
+
+function canAcceptCreateTarget(node, mediaType) {
+    if (!isMediaRelayNode(node)) return canAccept(node, mediaType);
+    if (!["image", "video", "audio", "batch"].includes(mediaType)) return false;
+    if (mediaType !== "batch") return true;
+    return !mediaRelayLinks(node).some((link) => getMediaType(link.source_type, app.graph?.getNodeById?.(Number(link.source_id))) === "batch");
 }
 
 function clearConnecting(canvas) {
@@ -634,11 +741,13 @@ function clearConnecting(canvas) {
     canvas.connecting_input = null;
 }
 
-function addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType, mediaType = null) {
+function addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType, mediaType = null, viaRelay = false) {
     if (!targetNode || !sourceNode || isSameNode(targetNode, sourceNode)) return false;
+    if (!viaRelay && mediaRelayIds(targetNode).length) return false;
     const sourceId = Number(sourceNode.id);
     if (!Number.isFinite(sourceId)) return false;
     mediaType ||= getMediaType(sourceType, sourceNode);
+    if (!isSupportedMaterialSourceFormat(sourceNode, mediaType)) return false;
     const links = ensureLinks(targetNode);
     const exists = links.some((link) =>
         Number(link.source_id) === sourceId && Number(link.source_slot) === Number(sourceSlot)
@@ -659,6 +768,99 @@ function addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType, mediaTyp
     app.graph?.setDirtyCanvas?.(true, true);
     app.graph?.change?.();
     requestMentionPreviewRefresh();
+    if (isMediaEditorNode(targetNode)) window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(targetNode.id) } }));
+    return true;
+}
+
+function mediaRelayLinks(node) {
+    const links = node?.properties?.[MEDIA_RELAY_LINKS_PROP];
+    return Array.isArray(links) ? links : [];
+}
+
+function mediaRelayIds(node) {
+    node.properties ||= {};
+    if (!Array.isArray(node.properties[MEDIA_RELAY_TARGETS_PROP])) node.properties[MEDIA_RELAY_TARGETS_PROP] = [];
+    return node.properties[MEDIA_RELAY_TARGETS_PROP];
+}
+
+function removeRelayFromTarget(targetNode, relayId, removeMentions = true) {
+    const id = Number(relayId);
+    const links = ensureLinks(targetNode);
+    let changed = false;
+    for (let index = links.length - 1; index >= 0; index -= 1) {
+        if (Number(links[index]?.display_source_id) !== id) continue;
+        if (removeMentions) removeMentionsForMaterial(targetNode, links[index]);
+        links.splice(index, 1);
+        changed = true;
+    }
+    const relayIds = mediaRelayIds(targetNode);
+    let relayChanged = false;
+    for (let index = relayIds.length - 1; index >= 0; index -= 1) {
+        if (Number(relayIds[index]) === id) {
+            relayIds.splice(index, 1);
+            relayChanged = true;
+        }
+    }
+    if (changed || relayChanged) {
+        resequence(targetNode);
+        refreshMaterialTray(targetNode);
+        targetNode.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        app.graph?.change?.();
+        requestMentionPreviewRefresh();
+    }
+    return changed || relayChanged;
+}
+
+function syncMediaRelayToTarget(targetNode, relayNode, removed = false, exclusive = false) {
+    if (!isTarget(targetNode) || !relayNode) return false;
+    const relayId = Number(relayNode.id);
+    if (!Number.isFinite(relayId)) return false;
+
+    if (exclusive) {
+        for (const link of [...ensureLinks(targetNode)]) removeMentionsForMaterial(targetNode, link);
+        targetNode.properties[LINKS_PROP] = [];
+        targetNode.properties[MEDIA_RELAY_TARGETS_PROP] = [relayId];
+    }
+
+    if (removed) return removeRelayFromTarget(targetNode, relayId);
+    if (!mediaRelayIds(targetNode).some((value) => Number(value) === relayId)) return false;
+
+    const desired = mediaRelayLinks(relayNode);
+    const sourceKey = (link) => `${Number(link?.source_id)}:${Number(link?.source_slot) || 0}`;
+    const desiredKeys = new Set(desired.map(sourceKey));
+    const links = ensureLinks(targetNode);
+    for (let index = links.length - 1; index >= 0; index -= 1) {
+        const link = links[index];
+        if (Number(link.display_source_id) !== relayId || desiredKeys.has(sourceKey(link))) continue;
+        removeMentionsForMaterial(targetNode, link);
+        links.splice(index, 1);
+    }
+    for (const relayLink of desired) {
+        const sourceNode = app.graph?.getNodeById?.(Number(relayLink.source_id));
+        if (!sourceNode) continue;
+        const sourceSlot = Number(relayLink.source_slot) || 0;
+        const sourceType = getSlotType(sourceNode.outputs?.[sourceSlot]) || relayLink.source_type || "*";
+        const mediaType = getMediaType(sourceType, sourceNode);
+        const existing = links.find((link) => sourceKey(link) === sourceKey(relayLink));
+        if (existing) {
+            existing.display_source_id = relayId;
+            existing.display_source_slot = 0;
+            continue;
+        }
+        if (addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType, mediaType, true)) {
+            const added = ensureLinks(targetNode).find((link) => sourceKey(link) === sourceKey(relayLink));
+            if (added) {
+                added.display_source_id = relayId;
+                added.display_source_slot = 0;
+            }
+        }
+    }
+    resequence(targetNode);
+    if (isMediaEditorNode(relayNode)) syncMediaEditorPromptsToTarget(relayNode, targetNode);
+    refreshMaterialTray(targetNode);
+    targetNode.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
     return true;
 }
 
@@ -717,13 +919,25 @@ function removeMentionsForMaterial(node, link) {
 function removeVirtualLink(node, index) {
     const links = ensureLinks(node);
     if (index < 0 || index >= links.length) return false;
-    links.splice(index, 1);
+    const [removed] = links.splice(index, 1);
+    const relayId = Number(removed?.display_source_id);
+    if (Number.isFinite(relayId)) {
+        const relay = app.graph?.getNodeById?.(relayId);
+        const relayLinks = mediaRelayLinks(relay);
+        const relayIndex = relayLinks.findIndex((link) =>
+            Number(link.source_id) === Number(removed.source_id)
+            && Number(link.source_slot || 0) === Number(removed.source_slot || 0)
+        );
+        if (relayIndex >= 0) relayLinks.splice(relayIndex, 1);
+        window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: relayId } }));
+    }
     resequence(node);
     refreshMaterialTray(node);
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
     app.graph?.change?.();
     requestMentionPreviewRefresh();
+    if (isMediaEditorNode(node)) window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(node.id) } }));
     return true;
 }
 
@@ -770,7 +984,15 @@ function convertNativeMediaConnection(targetNode, inputIndex, linkInfo = null) {
     const sourceType = getSlotType(output)
         || String(nativeLink.type || nativeLink.origin_type || nativeLink.originType || "*").toUpperCase();
 
-    const added = addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType);
+    const isMediaRelay = isMediaRelayNode(sourceNode);
+    let added = false;
+    if (isMediaRelay) {
+        const relayIds = mediaRelayIds(targetNode);
+        if (!relayIds.length) added = syncMediaRelayToTarget(targetNode, sourceNode, false, true);
+        else if (relayIds.some((value) => Number(value) === Number(sourceNode.id))) added = true;
+    } else if (!mediaRelayIds(targetNode).length) {
+        added = addVirtualLink(targetNode, sourceNode, sourceSlot, sourceType);
+    }
     targetNode.__adGuideVirtualWireClearing = true;
     try {
         if (targetNode.inputs?.[inputIndex]?.link != null && typeof targetNode.disconnectInput === "function") {
@@ -805,12 +1027,31 @@ function cubicPoint(start, end, t) {
 }
 
 function linkGeometry(targetNode, link) {
-    const sourceNode = targetNode.graph?.getNodeById?.(Number(link.source_id));
+    const displaySourceId = Number(link.display_source_id);
+    const sourceNode = targetNode.graph?.getNodeById?.(Number.isFinite(displaySourceId) ? displaySourceId : Number(link.source_id));
     const dot = getMediaDot(targetNode);
     if (!sourceNode || !dot) return null;
-    const source = getConnectionPosition(sourceNode, false, Number(link.source_slot) || 0);
+    const sourceSlot = Number.isFinite(displaySourceId) ? Number(link.display_source_slot) || 0 : Number(link.source_slot) || 0;
+    const source = getConnectionPosition(sourceNode, false, sourceSlot);
     const target = [dot.x, dot.y];
     return { sourceNode, source, target, mid: cubicPoint(source, target, 0.5) };
+}
+
+function displayLinks(targetNode) {
+    const links = ensureLinks(targetNode);
+    const representedRelays = new Set(links.map((link) => Number(link.display_source_id)).filter(Number.isFinite));
+    const emptyRelayLinks = mediaRelayIds(targetNode)
+        .map(Number)
+        .filter((relayId) => Number.isFinite(relayId) && !representedRelays.has(relayId))
+        .map((relayId) => ({
+            display_source_id: relayId,
+            display_source_slot: 0,
+            source_type: "*",
+            media_type: "relay",
+            order: 1,
+            relay_only: true,
+        }));
+    return [...links, ...emptyRelayLinks];
 }
 
 function getComfyLinkTypeColor(type) {
@@ -846,12 +1087,18 @@ function hitTestLinks(graph, x, y) {
     let best = null;
     for (const targetNode of graph?._nodes || []) {
         if (!isTarget(targetNode)) continue;
-        const links = ensureLinks(targetNode);
+        const links = displayLinks(targetNode);
+        const testedRelays = new Set();
         links.forEach((link, index) => {
+            const relayId = Number(link.display_source_id);
+            if (Number.isFinite(relayId)) {
+                if (testedRelays.has(relayId)) return;
+                testedRelays.add(relayId);
+            }
             const geometry = linkGeometry(targetNode, link);
             if (!geometry) return;
             const distance = Math.hypot(x - geometry.mid[0], y - geometry.mid[1]);
-            if (distance <= 18 && (!best || distance < best.distance)) best = { targetNode, index, point: geometry.mid, distance };
+            if (distance <= 18 && (!best || distance < best.distance)) best = { targetNode, index, relayId, point: geometry.mid, distance };
         });
     }
     return best;
@@ -880,7 +1127,8 @@ function openLinkMenu(canvas, hit, event) {
         : new MouseEvent("mousedown", { clientX: anchor.x + 8, clientY: anchor.y + 8, bubbles: true, cancelable: true });
     let menuInstance = null;
     const remove = () => {
-        removeVirtualLink(hit.targetNode, hit.index);
+        if (Number.isFinite(hit.relayId)) removeRelayFromTarget(hit.targetNode, hit.relayId);
+        else removeVirtualLink(hit.targetNode, hit.index);
         closeContextMenuCompat(menuInstance);
         if (linkMenu === menuInstance) linkMenu = null;
     };
@@ -894,6 +1142,7 @@ function openLinkMenu(canvas, hit, event) {
 
 function openCreateMenu(canvas, targetNode, event, allowedTypes) {
     if (!targetNode) return;
+    if (isTarget(targetNode)) normalizeLinks(targetNode, true);
     closeContextMenuCompat(createMenu);
     createMenu = null;
     releaseCreateMenuLinkHold?.();
@@ -915,8 +1164,8 @@ function openCreateMenu(canvas, targetNode, event, allowedTypes) {
         setNativeSearchVisualSuppression(false);
         clearTemporaryRenderLink(canvas);
     };
-    if (isMulTarget(targetNode)) allowedTypes = [...allowedTypes, "batch"];
-    const items = allowedTypes.filter((type) => canAccept(targetNode, type)).map((type) => ({
+    if (isMultiPromptNode(targetNode) || isMediaRelayNode(targetNode)) allowedTypes = [...allowedTypes, "batch"];
+    const items = allowedTypes.filter((type) => canAcceptCreateTarget(targetNode, type)).map((type) => ({
         content: LOADERS[type].label,
         callback: () => {
             createResourceNode(canvas, targetNode, type, [x, y]);
@@ -973,7 +1222,9 @@ function createResourceNode(canvas, targetNode, mediaType, position) {
         });
     }
     const output = node.outputs?.[slot] || {};
-    addVirtualLink(targetNode, node, slot, getSlotType(output) || mediaType.toUpperCase(), mediaType);
+    const sourceType = getSlotType(output) || mediaType.toUpperCase();
+    if (isMediaRelayNode(targetNode)) addMediaRelayLink(targetNode, node, slot, sourceType, mediaType);
+    else addVirtualLink(targetNode, node, slot, sourceType, mediaType);
     graph.setDirtyCanvas?.(true, true);
     return true;
 }
@@ -1007,7 +1258,7 @@ function getPendingConnectorLink(canvas) {
     if (outputIndex >= 0 && inputIndex < 0) direction = "from_output";
     if (direction === "from_input") {
         const input = endpointNode?.inputs?.[inputIndex] || endpointSlot;
-        if (!isTarget(endpointNode) || String(input?.name || "") !== "media") return null;
+        if ((!isTarget(endpointNode) && !isMediaRelayNode(endpointNode)) || String(input?.name || "") !== "media") return null;
         return { direction, targetNode: endpointNode, targetSlot: inputIndex };
     }
     const output = endpointNode?.outputs?.[outputIndex] || endpointSlot || {};
@@ -1134,6 +1385,7 @@ function getTargetInputLinkId(pending) {
 }
 
 function getVirtualLinkCount(node) {
+    if (isMediaRelayNode(node)) return mediaRelayLinks(node).length;
     return isTarget(node) ? ensureLinks(node).length : 0;
 }
 
@@ -1348,8 +1600,14 @@ function drawLinks(canvas, ctx) {
     let missingLinkFound = false;
     for (const targetNode of graph._nodes) {
         if (!isTarget(targetNode)) continue;
-        const links = ensureLinks(targetNode);
+        const links = displayLinks(targetNode);
+        const drawnRelays = new Set();
         for (const link of links) {
+            const relayId = Number(link.display_source_id);
+            if (Number.isFinite(relayId)) {
+                if (drawnRelays.has(relayId)) continue;
+                drawnRelays.add(relayId);
+            }
             const geometry = linkGeometry(targetNode, link);
             if (!geometry) {
                 missingLinkFound = true;
@@ -1398,7 +1656,7 @@ function drawLinks(canvas, ctx) {
                 ctx.font = "bold 11px system-ui, sans-serif";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText(String(Number(link.order) || 1), markerX, markerY + 0.5);
+                ctx.fillText(Number.isFinite(relayId) ? "1" : String(Number(link.order) || 1), markerX, markerY + 0.5);
             }
             ctx.restore();
         }
@@ -1411,8 +1669,7 @@ function patchCanvas() {
     if (!canvas || canvas.__adGuideEasyCanvasPatchedUI15 || typeof canvas.drawConnections !== "function") return;
     canvas.__adGuideEasyCanvasPatchedUI15 = true;
     patchedCanvas = true;
-    const nativeDraw = Object.getPrototypeOf(canvas)?.drawConnections;
-    const originalDraw = typeof nativeDraw === "function" ? nativeDraw : canvas.drawConnections;
+    const originalDraw = canvas.drawConnections;
     canvas.drawConnections = function drawConnectionsWithH3Links(ctx) {
         const result = originalDraw?.apply(this, arguments);
         const connectionContext = ctx || this.bgctx || this.ctx;
@@ -1454,7 +1711,7 @@ function patchCanvas() {
 function getInputConnection(canvas) {
     const node = canvas?.connecting_node || canvas?.connectingNode;
     const input = canvas?.connecting_input || canvas?.connectingInput;
-    if (!node || !isTarget(node) || !input) return null;
+    if (!node || (!isTarget(node) && !isMediaRelayNode(node)) || !input) return null;
     const slot = typeof input === "number" ? node.inputs?.[input] : input;
     if (String(slot?.name || "") !== "media") return null;
     return { targetNode: node };
@@ -1483,7 +1740,7 @@ function buildRuntimePrompt(node, runtimeLinks, promptDoc = null, stageIndex = -
         // Index labels are positional: Picture 2 always means the second image
         // in the current material order, regardless of which source used to be
         // connected when the label was inserted.
-        if ((referenceMode !== "index" || isMulTarget(node)) && partSourceId != null) {
+        if ((referenceMode !== "index" || isStagePromptTarget(node)) && partSourceId != null) {
             index = runtimeLinks.findIndex((link) =>
                 Number(link.source_id) === partSourceId
                 && Number(link.source_slot) === Number(part.sourceSlot || 0)
@@ -1541,17 +1798,32 @@ function patchGraphToPrompt() {
                 promptNode.inputs[`media_${index + 1}`] = [String(link.source_id), slot];
                 promptNode.inputs[`media_type_${index + 1}`] = String(link.media_type || "image");
             });
-            if (isMulTarget(node)) {
+            if (isStagePromptTarget(node)) {
                 const docs = ensureStagePromptDocs(node);
                 if (carryLink) promptNode.inputs.stage_data = [String(carryLink.source_id), Number(carryLink.source_slot) || 0];
                 else delete promptNode.inputs.stage_data;
                 promptNode.inputs.prompt = "";
-                promptNode.inputs.stage_prompts = JSON.stringify(docs.map((doc, index) => buildRuntimePrompt(node, transportLinks, doc, index)));
+                promptNode.inputs.stage_prompts = JSON.stringify(docs.map((doc, index) => {
+                    const runtimePrompt = buildRuntimePrompt(node, transportLinks, doc, index);
+                    return getWidget(node, "single_stage_time")
+                        ? { prompt: runtimePrompt, single_stage_time: doc.single_stage_time }
+                        : runtimePrompt;
+                }));
+                if (isGuideTarget(node)) {
+                    promptNode.inputs.stage_index = Math.max(1, Math.min(docs.length, Number(node.properties?.[STAGE_PROMPT_INDEX_PROP]) + 1 || 1));
+                }
             } else if (textLink) promptNode.inputs.prompt = [String(textLink.source_id), Number(textLink.source_slot) || 0];
             else if (!promptIsLinked) promptNode.inputs.prompt = buildRuntimePrompt(node, transportLinks);
             if (!Array.isArray(promptNode.inputs.width)) promptNode.inputs.width = Number(getWidgetValue(node, "width", 1344));
             if (!Array.isArray(promptNode.inputs.height)) promptNode.inputs.height = Number(getWidgetValue(node, "height", 768));
-            if (!Array.isArray(promptNode.inputs.length)) promptNode.inputs.length = Number(getWidgetValue(node, "length", 124));
+            if (getWidget(node, "single_stage_time")) {
+                const docs = ensureStagePromptDocs(node);
+                const index = Math.max(0, Math.min(docs.length - 1, Number(node.properties?.[STAGE_PROMPT_INDEX_PROP]) || 0));
+                promptNode.inputs.single_stage_time = docs[index].single_stage_time;
+                delete promptNode.inputs.length;
+            } else if (!Array.isArray(promptNode.inputs.length)) {
+                promptNode.inputs.length = Number(getWidgetValue(node, "length", 124));
+            }
             if (getWidget(node, "single_image_position")) {
                 promptNode.inputs.single_image_position = canonicalOption(
                     "single_image_position",
@@ -1628,9 +1900,20 @@ function sourceFilename(node, mediaType) {
         const name = String(widget?.name || "").toLowerCase();
         const filename = widgetFilename(widget?.value);
         if (!filename) continue;
-        if (preferredSet.has(name) || /\.(png|jpe?g|webp|gif|bmp|mp4|webm|mov|mkv|avi|m4v|mp3|wav|flac|ogg|m4a)$/i.test(filename)) return filename;
+        if (preferredSet.has(name) || /\.(png|jpe?g|webp|heic|heif|gif|bmp|mp4|webm|mov|mkv|avi|m4v|mp3|wav|flac|ogg|m4a)$/i.test(filename)) return filename;
     }
     return widgetFilename(node?.properties?.filename || node?.properties?.file || "");
+}
+
+function isSupportedMaterialSourceFormat(node, mediaType) {
+    const sourceClass = String(node?.comfyClass || node?.type || "").toLowerCase();
+    if (String(mediaType || "").toLowerCase() === "audio" && sourceClass.includes("loadaudio")) return true;
+    const allowed = SUPPORTED_MATERIAL_EXTENSIONS[String(mediaType || "").toLowerCase()];
+    if (!allowed) return true;
+    const filename = sourceFilename(node, mediaType);
+    if (!filename) return true;
+    const match = filename.match(/\.([^.]+)$/);
+    return Boolean(match && allowed.has(match[1].toLowerCase()));
 }
 
 function truncateMentionLabel(value, maxLength = 22) {
@@ -1692,7 +1975,7 @@ function normalizeEditorMentionTags(node, sync = true) {
 }
 
 function mentionOptions(node) {
-    if (!isReferenceMode(node)) return [];
+    if (!isReferenceMode(node) && !isMediaEditorNode(node)) return [];
     const orderedLinks = normalizeLinks(node).filter((link) => !SPECIAL_MATERIAL_TYPES.has(String(link.media_type || "image")));
     const counts = { image: 0, video: 0, audio: 0 };
     const mode = referenceMentionMode(node);
@@ -1879,6 +2162,20 @@ function requestMentionPreviewRefresh() {
     }, 0);
 }
 
+function removePromptDomWidget(node, widget) {
+    if (!widget) return;
+    const index = node?.widgets?.indexOf?.(widget) ?? -1;
+    if (index >= 0) node.widgets.splice(index, 1);
+    widget.onRemove?.();
+    widget.element?.remove?.();
+}
+
+function prunePromptDomWidgets(node, keep = null) {
+    for (const widget of [...(node?.widgets || [])]) {
+        if (widget !== keep && widget?.name === "h3_prompt_mentions") removePromptDomWidget(node, widget);
+    }
+}
+
 function repairDetachedPromptEditor(node) {
     if (!node?.__adGuideEditor) {
         installPromptEditorSoon(node);
@@ -1893,8 +2190,8 @@ function repairDetachedPromptEditor(node) {
     if (node.__adGuideDetachedEditorRepairVersion === AD_GUIDE_UI_VERSION) return;
     node.__adGuideDetachedEditorRepairVersion = AD_GUIDE_UI_VERSION;
     closeMentionMenu(node);
-    const domIndex = node.widgets?.indexOf?.(domWidget) ?? -1;
-    if (domIndex >= 0) node.widgets.splice(domIndex, 1);
+    removePromptDomWidget(node, domWidget);
+    prunePromptDomWidgets(node);
     wrap?.remove?.();
     node.__adGuideEditor = null;
     node.__adGuideEditorVersion = "";
@@ -1959,7 +2256,7 @@ function watchMediaSourceNode(node) {
 
 function installMediaSourceNode(nodeType, nodeData) {
     const name = String(nodeData?.name || "").toLowerCase();
-    if (name !== "text_minimaxh3" && !name.includes("loadimage") && !name.includes("loadvideo") && !name.includes("loadaudio")) return;
+    if (name !== MEDIA_RELAY_CLASS.toLowerCase() && name !== MEDIA_EDITOR_CLASS.toLowerCase() && name !== "text_minimaxh3" && !name.includes("loadimage") && !name.includes("loadvideo") && !name.includes("loadaudio")) return;
     if (nodeType.prototype.__adGuideMediaSourceInstalled) return;
     nodeType.prototype.__adGuideMediaSourceInstalled = true;
     const originalCreated = nodeType.prototype.onNodeCreated;
@@ -2280,13 +2577,17 @@ function importBatchPrompts(node, link) {
     node.properties[PROMPT_DOC_PROP] = docs[0];
     setConfiguredWidgetValue(node, "prompt", docs[0].text);
     updateStagePromptsWidget(node);
-    renderEditorFromNode(node, true);
-    resetPromptHistory(node);
-    closeMentionMenu(node);
-    updateStagePromptBar(node);
+    if (isMediaEditorNode(node)) renderMediaEditorRows(node);
+    else {
+        renderEditorFromNode(node, true);
+        resetPromptHistory(node);
+        closeMentionMenu(node);
+        updateStagePromptBar(node);
+    }
     node.setDirtyCanvas?.(true, true);
     app.graph?.afterChange?.();
     app.graph?.change?.();
+    if (isMediaEditorNode(node)) window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(node.id) } }));
     return docs.length;
 }
 
@@ -2353,6 +2654,35 @@ function batchImageSources(link) {
 function importBatchImages(node, link) {
     const sources = batchImageSources(link);
     if (!sources.length) throw new Error("Batch Images 没有已连接的图片输入");
+    const relayId = Number(link?.display_source_id);
+    if (Number.isFinite(relayId)) {
+        const relay = app.graph?.getNodeById?.(relayId);
+        if (!relay || String(relay?.comfyClass || relay?.type || "") !== MEDIA_RELAY_CLASS) {
+            throw new Error("Media 中继节点不存在");
+        }
+        const relayLinks = mediaRelayLinks(relay);
+        const existingKeys = new Set(relayLinks.map((item) => `${Number(item.source_id)}:${Number(item.source_slot) || 0}`));
+        const limits = mediaLimits(node);
+        let imageCount = ensureLinks(node).filter((item) => String(item.media_type || "") === "image").length;
+        let referenceCount = ensureLinks(node).filter((item) => !SPECIAL_MATERIAL_TYPES.has(String(item.media_type || "image"))).length;
+        let relayAdded = 0;
+        for (const source of sources) {
+            const key = `${Number(source.sourceNode.id)}:${Number(source.sourceSlot) || 0}`;
+            if (existingKeys.has(key) || imageCount >= limits.image || referenceCount >= limits.total) continue;
+            relayLinks.push({
+                source_id: Number(source.sourceNode.id),
+                source_slot: Number(source.sourceSlot) || 0,
+                source_type: source.sourceType || "IMAGE",
+            });
+            existingKeys.add(key);
+            imageCount += 1;
+            referenceCount += 1;
+            relayAdded += 1;
+        }
+        if (relayAdded) window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: relayId } }));
+        return relayAdded;
+    }
+    if (!sources.length) throw new Error("Batch Images 没有已连接的图片输入");
     let added = 0;
     for (const source of sources) {
         if (addVirtualLink(node, source.sourceNode, source.sourceSlot, source.sourceType, "image")) added += 1;
@@ -2361,6 +2691,7 @@ function importBatchImages(node, link) {
 }
 
 function createBatchImageCard(node, link) {
+    watchMediaSourceNode(app.graph?.getNodeById?.(Number(link.source_id)));
     const card = document.createElement("div");
     card.className = "ad-guide-material-card is-batch is-image-batch";
     card.title = "双击：按 Batch Images 的输入顺序，将图片追加到素材区。";
@@ -2396,19 +2727,199 @@ function createBatchImageCard(node, link) {
     return card;
 }
 
+function selectedFileMediaType(file) {
+    const name = String(file?.name || "");
+    const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+    for (const [type, extensions] of Object.entries(SUPPORTED_MATERIAL_EXTENSIONS)) {
+        if (extensions.has(extension)) return type;
+    }
+    return null;
+}
+
+function materialImportOwner(node) {
+    if (!isTarget(node)) return node;
+    const relayId = mediaRelayIds(node).map(Number).find(Number.isFinite);
+    return relayId == null ? node : (app.graph?.getNodeById?.(relayId) || node);
+}
+
+async function uploadMaterialFile(file, mediaType) {
+    const body = new FormData();
+    if (mediaType === "image") {
+        body.append("image", file, file.name);
+        body.append("type", "input");
+        const response = await api.fetchApi("/upload/image", { method: "POST", body });
+        if (!response.ok) throw new Error(await response.text());
+        const result = await response.json();
+        const name = String(result?.name || "");
+        const subfolder = String(result?.subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        return subfolder ? `${subfolder}/${name}` : name;
+    }
+    body.append("media", file, file.name);
+    const response = await api.fetchApi(`/Apt_Preset_IO_LoadMedia_upload?media_type=${encodeURIComponent(mediaType)}`, {
+        method: "POST",
+        body,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const result = await response.json();
+    return String(Array.isArray(result?.items) ? result.items[0] || "" : "");
+}
+
+function importedLoaderPosition(targetNode, index) {
+    const row = index % 6;
+    const column = Math.floor(index / 6);
+    return [
+        Number(targetNode?.pos?.[0] || 0) - 300 - column * 260,
+        Number(targetNode?.pos?.[1] || 0) + row * 120,
+    ];
+}
+
+function registerUploadedComboValue(widget, value) {
+    if (!widget || !value) return;
+    const register = (options) => {
+        if (!options) return;
+        const current = options.values;
+        if (Array.isArray(current)) {
+            if (!current.includes(value)) current.push(value);
+            return;
+        }
+        if (typeof current === "function") {
+            options.values = () => {
+                const values = current();
+                const list = Array.isArray(values) ? [...values] : [];
+                if (!list.includes(value)) list.push(value);
+                return list;
+            };
+            return;
+        }
+        options.values = [value];
+    };
+    widget.options ||= {};
+    register(widget.options);
+    if (widget._state) {
+        widget._state.options ||= {};
+        register(widget._state.options);
+    }
+}
+
+function createImportedResourceNode(targetNode, mediaType, value, index, sourceName = "") {
+    const spec = LOADERS[mediaType];
+    const graph = targetNode?.graph || app.graph;
+    const LiteGraph = globalThis.LiteGraph;
+    if (!spec || !graph || !LiteGraph?.createNode || !canAcceptCreateTarget(targetNode, mediaType)) return false;
+    const sourceNode = LiteGraph.createNode(spec.classType);
+    if (!sourceNode) return false;
+    sourceNode.pos = importedLoaderPosition(targetNode, index);
+    graph.add(sourceNode);
+    const widgetName = mediaType === "image" ? "image" : mediaType === "video" ? "file" : mediaType === "audio" ? "audio" : "text";
+    const widget = getWidget(sourceNode, widgetName);
+    if (widget) {
+        if (mediaType !== "batch") registerUploadedComboValue(widget, value);
+        widget.value = value;
+        if (widget._state) widget._state.value = value;
+        widget.callback?.(value);
+    }
+    if (mediaType === "batch") {
+        const delimiter = getWidget(sourceNode, "delimiter");
+        if (delimiter) {
+            delimiter.value = "【Segment {n}】";
+            if (delimiter._state) delimiter._state.value = delimiter.value;
+        }
+    }
+    if (sourceName) sourceNode.title = `${spec.label} · ${sourceName}`;
+    const slot = sourceNode.outputs?.findIndex((output) => getMediaType(getSlotType(output), sourceNode) === mediaType) ?? 0;
+    const sourceType = getSlotType(sourceNode.outputs?.[slot]) || (mediaType === "batch" ? "ARRAY" : mediaType.toUpperCase());
+    const added = isMediaRelayNode(targetNode)
+        ? addMediaRelayLink(targetNode, sourceNode, slot, sourceType, mediaType)
+        : addVirtualLink(targetNode, sourceNode, slot, sourceType, mediaType);
+    if (!added) graph.remove?.(sourceNode);
+    graph.setDirtyCanvas?.(true, true);
+    return added;
+}
+
+async function importMaterialFiles(node, files) {
+    const owner = materialImportOwner(node);
+    const accepted = Array.from(files || []).map((file) => ({ file, type: selectedFileMediaType(file) })).filter((item) => item.type);
+    if (!accepted.length) throw new Error("没有选择受支持的图片、视频、音频或 TXT 文件。");
+    let created = 0;
+    const textFiles = [];
+    for (const item of accepted) {
+        if (item.type === "text") {
+            textFiles.push(item.file);
+            continue;
+        }
+        if (!canAcceptCreateTarget(owner, item.type)) continue;
+        const uploaded = await uploadMaterialFile(item.file, item.type);
+        if (uploaded && createImportedResourceNode(owner, item.type, uploaded, created, item.file.name)) created += 1;
+    }
+    if (textFiles.length && canAcceptCreateTarget(owner, "batch")) {
+        const texts = await Promise.all(textFiles.map((file) => file.text()));
+        const joined = texts.map((text, index) => index ? `【Segment ${index + 1}】\n${text}` : text).join("\n");
+        const title = textFiles.length === 1 ? textFiles[0].name : `${textFiles.length} TXT`;
+        if (createImportedResourceNode(owner, "batch", joined, created, title)) created += 1;
+    }
+    if (!created) throw new Error("素材数量已达到上限，或当前素材区不接受所选文件。");
+    refreshMaterialTray(node);
+    app.graph?.change?.();
+    return created;
+}
+
+function createMaterialFolderCard(node) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "ad-guide-material-card ad-guide-material-folder";
+    card.title = "批量导入图片、视频、音频或 TXT，并自动创建加载节点和素材连线";
+    card.setAttribute("aria-label", card.title);
+    card.style.cursor = "pointer";
+    const icon = document.createElement("span");
+    icon.textContent = "📁";
+    icon.style.cssText = "font-size:24px;line-height:1;pointer-events:none";
+    const label = document.createElement("span");
+    label.textContent = "导入";
+    label.style.cssText = "font:10px/1.2 system-ui;pointer-events:none";
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.accept = ".jpg,.jpeg,.png,.webp,.heic,.heif,.gif,.bmp,.mp4,.mov,.webm,.mkv,.avi,.m4v,.wav,.mp3,.flac,.ogg,.m4a,.aac,.opus,.wma,.txt";
+    input.hidden = true;
+    card.addEventListener("pointerdown", (event) => event.stopPropagation());
+    card.addEventListener("click", (event) => {
+        if (event.target === input) return;
+        event.preventDefault();
+        event.stopPropagation();
+        input.click();
+    });
+    input.addEventListener("change", async (event) => {
+        const files = Array.from(event.target?.files || []);
+        input.value = "";
+        if (!files.length) return;
+        card.disabled = true;
+        try {
+            const count = await importMaterialFiles(node, files);
+            card.title = `已导入 ${count} 个加载节点。再次点击可继续导入。`;
+        } catch (error) {
+            app.ui.dialog.show(String(error?.message || error));
+        } finally {
+            card.disabled = false;
+        }
+    });
+    card.append(icon, label, input);
+    return card;
+}
+
 function refreshMaterialTray(node, suppliedOptions = null) {
     const tray = node?.__adGuideMaterialTray;
     if (!tray) return;
     const options = suppliedOptions || mentionOptions(node);
     tray.textContent = "";
+    tray.append(createMaterialFolderCard(node));
     const links = normalizeLinks(node);
     const batchLink = links.find((link) => link.media_type === "batch");
     const batchImageLink = links.find((link) => link.media_type === "image_batch");
     if (batchLink) tray.append(createBatchPromptCard(node, batchLink));
     if (batchImageLink) tray.append(createBatchImageCard(node, batchImageLink));
-    const fixedCardCount = (batchLink ? 1 : 0) + (batchImageLink ? 1 : 0);
+    const fixedCardCount = 1 + (batchLink ? 1 : 0) + (batchImageLink ? 1 : 0);
     resizeMaterialTray(node, options.length + fixedCardCount);
-    if (!options.length && !fixedCardCount) {
+    if (!options.length && fixedCardCount === 1) {
         const empty = document.createElement("div");
         empty.className = "ad-guide-material-empty";
         empty.textContent = isFl2Target(node) ? TEXT.fl2MaterialEmpty : TEXT.materialEmpty;
@@ -2719,17 +3230,26 @@ function syncPromptFromEditor(node, markDirty = true) {
         if (widget._state) widget._state.value = doc.text;
         node.properties ||= {};
         node.properties[PROMPT_DOC_PROP] = doc;
-        if (isMulTarget(node)) {
+        if (isMultiPromptNode(node)) {
             const docs = ensureStagePromptDocs(node);
             const index = Number(node.properties[STAGE_PROMPT_INDEX_PROP]) || 0;
-            docs[index] = clonePromptDoc(doc);
+            docs[index] = clonePromptDoc({
+                ...doc,
+                single_stage_time: docs[index]?.single_stage_time,
+            });
             node.properties[STAGE_PROMPT_DOCS_PROP] = docs;
+            node.properties[PROMPT_DOC_PROP] = docs[index];
             updateStagePromptBar(node);
         }
         if (markDirty) {
             node.setDirtyCanvas?.(true, true);
             app.graph?.setDirtyCanvas?.(true, true);
             app.graph?.change?.();
+            if (isMediaEditorNode(node)) {
+                updateMediaEditorMaterialCells(node);
+                resizeMediaEditorNode(node);
+                window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(node.id), promptsOnly: true } }));
+            }
         }
     } finally {
         node.__adGuideEditorSyncing = false;
@@ -2740,10 +3260,15 @@ function clonePromptDoc(doc) {
     const source = doc && typeof doc === "object" ? doc : {};
     const text = String(source.text || "");
     const parts = Array.isArray(source.parts) ? source.parts.map((part) => ({ ...part })) : [];
+    const singleStageTime = Math.min(
+        MAX_STAGE_TIME,
+        Math.max(MIN_STAGE_TIME, Math.round(Number(source.single_stage_time) || DEFAULT_STAGE_TIME)),
+    );
     return {
         version: 1,
         text,
         parts: parts.length || !text ? parts : [{ type: "text", text }],
+        single_stage_time: singleStageTime,
     };
 }
 
@@ -2762,18 +3287,409 @@ function ensureStagePromptDocs(node) {
     return docs;
 }
 
+function renderPromptDoc(node, editor, doc) {
+    editor.textContent = "";
+    const value = clonePromptDoc(doc);
+    if (!value.parts.length) {
+        appendPromptTextWithDialogueBlocks(editor, value.text, node);
+        return;
+    }
+    const live = mentionOptions(node);
+    for (const part of value.parts) {
+        if (part?.type === "dialogue") {
+            appendDialogueBlock(editor, String(part.text || ""));
+        } else if (part?.type !== "mention") {
+            appendTextWithMentionChips(node, editor, part?.text || "");
+        } else if (part.textTag) {
+            appendTextWithBreaks(editor, part.token || part.label || "");
+        } else {
+            const option = findMentionOption(live, part, referenceMentionMode(node));
+            editor.append(makeMentionChip({
+                type: part.mediaType || option?.type || "image",
+                token: option?.token || part.token || option?.tag || "",
+                tag: option?.tag || part.token || "",
+                label: option?.label || part.label || part.token || "",
+                fullLabel: option?.fullLabel || part.fullLabel || part.label || part.token || "",
+                referenceMode: referenceMentionMode(node),
+                ordinal: option?.ordinal ?? part.ordinal,
+                sourceId: option?.sourceId ?? part.sourceId,
+                sourceSlot: option?.sourceSlot ?? part.sourceSlot ?? 0,
+                previewUrl: option?.previewUrl || "",
+                unresolved: !option,
+            }, node));
+        }
+    }
+}
+
+function mediaEditorDocOptions(node, doc) {
+    const live = mentionOptions(node);
+    const seen = new Set();
+    const values = [];
+    for (const part of doc?.parts || []) {
+        if (part?.type !== "mention" || part.textTag) continue;
+        const option = findMentionOption(live, part, referenceMentionMode(node));
+        if (!option) continue;
+        const key = materialLinkKey(option);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        values.push(option);
+    }
+    return values;
+}
+
+function updateMediaEditorMaterialCells(node) {
+    const docs = ensureStagePromptDocs(node);
+    for (const row of node.__adMediaEditorRows || []) {
+        const cell = row.materialCell;
+        if (!cell) continue;
+        cell.textContent = "";
+        const options = mediaEditorDocOptions(node, docs[row.index]);
+        if (!options.length) {
+            const empty = document.createElement("span");
+            empty.className = "ad-media-editor-empty-ref";
+            empty.textContent = "—";
+            cell.append(empty);
+            continue;
+        }
+        for (const option of options) {
+            const badge = document.createElement("div");
+            badge.className = "ad-media-editor-ref";
+            badge.title = option.fullLabel || option.label || "";
+            badge.append(makeMentionThumb(option), document.createTextNode(materialMentionLabel(option)));
+            cell.append(badge);
+        }
+    }
+}
+
+function selectMediaEditorRow(node, editor, index) {
+    const docs = ensureStagePromptDocs(node);
+    const next = Math.max(0, Math.min(docs.length - 1, Number(index) || 0));
+    node.properties[STAGE_PROMPT_INDEX_PROP] = next;
+    node.properties[PROMPT_DOC_PROP] = docs[next];
+    node.__adGuideEditor = editor;
+    const promptWidget = getWidget(node, "prompt");
+    if (promptWidget) promptWidget.value = String(docs[next]?.text || "");
+    for (const row of node.__adMediaEditorRows || []) row.element.classList.toggle("is-active", row.index === next);
+}
+
+function installMediaEditorPromptInteractions(node, editor, wrap, choose) {
+    preparePromptEditorForUndo(editor);
+    editor.addEventListener("beforeinput", (event) => {
+        if (node.__adGuidePromptTagHashHandled) {
+            node.__adGuidePromptTagHashHandled = false;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            return;
+        }
+        if (event.inputType === "insertText" && ["#", "＃"].includes(event.data) && !isMaterialHashContext(editor) && openPromptTagMenu(node, editor)) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            return;
+        }
+        if (isReferenceMode(node) && event.data === "@") setTimeout(() => syncMentionMenuToCaret(node, editor), 0);
+    });
+    editor.addEventListener("input", (event) => {
+        choose();
+        closePromptTagMenu(node);
+        if (!event?.isComposing && event?.inputType !== "insertCompositionText" && !node.__adGuidePromptComposing) {
+            convertTypedMaterialMention(node, editor);
+        }
+        syncPromptFromEditor(node);
+        if (event?.isComposing || event?.inputType === "insertCompositionText" || node.__adGuidePromptComposing) {
+            syncMentionMenuToCaret(node, editor);
+            return;
+        }
+        pushPromptHistory(node);
+        syncMentionMenuToCaret(node, editor);
+    });
+    editor.addEventListener("compositionstart", () => {
+        choose();
+        node.__adGuidePromptComposing = true;
+    });
+    editor.addEventListener("compositionend", () => {
+        node.__adGuidePromptComposing = false;
+        convertTypedMaterialMention(node, editor);
+        syncPromptFromEditor(node);
+        pushPromptHistory(node);
+    });
+    editor.addEventListener("focus", () => {
+        choose();
+        activePromptNode = node;
+        applyNativeEditorTheme(wrap);
+        syncMentionMenuToCaret(node, editor);
+    });
+    editor.addEventListener("blur", () => {
+        syncPromptFromEditor(node);
+        setTimeout(() => closePromptTagMenu(node), 0);
+        setTimeout(() => {
+            if (!node.__adGuideMentionMenu?.element?.matches?.(":hover")) closeMentionMenu(node);
+        }, 160);
+    });
+    editor.addEventListener("pointerdown", (event) => {
+        choose();
+        activePromptNode = node;
+        event.stopPropagation();
+    }, true);
+    editor.addEventListener("keyup", (event) => {
+        if (!isReferenceMode(node) || ["ArrowUp", "ArrowDown", "Enter", "Escape", "Tab"].includes(event.key)) return;
+        syncMentionMenuToCaret(node, editor);
+        event.stopPropagation();
+    });
+    editor.addEventListener("keydown", (event) => {
+        if (isPromptUndoRedoEvent(event)) handlePromptHistoryKeydown(node, event);
+    }, true);
+    editor.addEventListener("keydown", (event) => {
+        if (handlePromptTagMenuKeydown(node, event) || handleMentionMenuKeydown(node, event)) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        if (["#", "＃"].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey && !isMaterialHashContext(editor) && openPromptTagMenu(node, editor)) {
+            event.preventDefault();
+            event.stopPropagation();
+            node.__adGuidePromptTagHashHandled = true;
+            setTimeout(() => { node.__adGuidePromptTagHashHandled = false; }, 0);
+            return;
+        }
+        const dialogue = dialogueBlockAtSelection(editor);
+        if (event.key === "Enter" && dialogue && !event.shiftKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            exitDialogueBlock(node, editor, dialogue);
+            syncPromptFromEditor(node);
+            pushPromptHistory(node);
+            return;
+        }
+        if (event.key === "Enter" && dialogue && event.shiftKey && insertEditorLineBreak(editor)) {
+            event.preventDefault();
+            event.stopPropagation();
+            syncPromptFromEditor(node);
+            pushPromptHistory(node);
+            return;
+        }
+        if (event.key === "Backspace" && (
+            backspaceDialogueBoundary(editor, node)
+            || deleteLineBreakNearCaret(editor, node, "backward")
+            || deleteChipNearCaret(editor, node, "backward")
+            || backspaceBeforeChip(editor, node)
+            || backspaceAtLooseSentinel(editor, node)
+            || blockNativeSentinelDeletion(editor)
+        )) {
+            event.preventDefault();
+            syncPromptFromEditor(node);
+            pushPromptHistory(node);
+        } else if (event.key === "Delete" && deleteChipNearCaret(editor, node, "forward")) {
+            event.preventDefault();
+            syncPromptFromEditor(node);
+            pushPromptHistory(node);
+        } else if (event.key === "Enter" && insertEditorLineBreak(editor)) {
+            event.preventDefault();
+            closeMentionMenu(node);
+            syncPromptFromEditor(node);
+            pushPromptHistory(node);
+        } else if (event.key === "Escape") {
+            closeMentionMenu(node);
+        }
+        event.stopPropagation();
+    });
+    editor.addEventListener("paste", (event) => {
+        choose();
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        insertTextWithMentionChips(node, editor, event.clipboardData?.getData("text/plain") || "");
+        syncPromptFromEditor(node);
+        pushPromptHistory(node);
+        syncMentionMenuToCaret(node, editor);
+    });
+    wrap.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+        if (!event.target?.closest?.(".ad-guide-mention-chip")) closeMentionMenu(node);
+    });
+}
+
+function truncateMediaEditorPreview(text, tokenLimit) {
+    const source = String(text || "");
+    const limit = Math.max(0, Number(tokenLimit) || 0);
+    if (!source || !limit) return { text: "", used: 0, truncated: Boolean(source) };
+    const pattern = /[A-Za-z0-9_]+|[^\s]/gu;
+    let used = 0;
+    let end = 0;
+    for (const match of source.matchAll(pattern)) {
+        const token = match[0];
+        const cost = /^[A-Za-z0-9_]+$/.test(token) ? Math.max(1, Math.ceil(token.length / 4)) : 1;
+        if (used + cost > limit) break;
+        used += cost;
+        end = match.index + token.length;
+    }
+    const truncated = end < source.trimEnd().length;
+    return {
+        text: source.slice(0, end).trimEnd(),
+        used,
+        truncated,
+    };
+}
+
+function mediaEditorExpandedRows(node) {
+    if (!(node.__adMediaEditorExpandedRows instanceof Set)) node.__adMediaEditorExpandedRows = new Set();
+    return node.__adMediaEditorExpandedRows;
+}
+
+function resizeMediaEditorNode(node) {
+    if (node?.__adMediaEditorResizePending) return;
+    node.__adMediaEditorResizePending = true;
+    requestAnimationFrame(() => {
+        node.__adMediaEditorResizePending = false;
+        const trayHeight = Number(node.__adGuideMaterialTray?.dataset?.trayHeight) || 70;
+        const tableHeight = Math.max(52, Number(node.__adMediaEditorTable?.scrollHeight) || 52);
+        node.setSize?.([Math.max(560, Number(node.size?.[0]) || 560), trayHeight + tableHeight + 42]);
+        node._widgetSlotsDirty = true;
+        node.setDirtyCanvas?.(true, true);
+    });
+}
+
+function setMediaEditorRowExpanded(node, index, expanded) {
+    if (node.__adGuideEditor) syncPromptFromEditor(node, false);
+    const rows = mediaEditorExpandedRows(node);
+    if (expanded) rows.add(index);
+    else rows.delete(index);
+    node.properties[STAGE_PROMPT_INDEX_PROP] = index;
+    node.__adGuideEditor = null;
+    renderMediaEditorRows(node);
+    if (expanded) node.__adMediaEditorRows?.[index]?.editor?.focus();
+}
+
+function renderMediaEditorRows(node) {
+    const table = node?.__adMediaEditorTable;
+    if (!table) return;
+    const docs = ensureStagePromptDocs(node);
+    const active = Math.max(0, Math.min(docs.length - 1, Number(node.properties[STAGE_PROMPT_INDEX_PROP]) || 0));
+    const expandedRows = mediaEditorExpandedRows(node);
+    for (const index of expandedRows) {
+        if (index < 0 || index >= docs.length) expandedRows.delete(index);
+    }
+    table.textContent = "";
+    node.__adMediaEditorRows = [];
+    docs.forEach((doc, index) => {
+        const expanded = expandedRows.has(index);
+        const row = document.createElement("div");
+        row.className = `ad-media-editor-row${expanded ? " is-expanded" : ""}`;
+        const materialCell = document.createElement("div");
+        materialCell.className = "ad-media-editor-material-cell";
+        const textCell = document.createElement("div");
+        textCell.className = "ad-media-editor-text-cell";
+        const previewValue = truncateMediaEditorPreview(doc?.text, MEDIA_EDITOR_PREVIEW_TOKEN_LIMIT);
+        const preview = document.createElement("div");
+        preview.className = "ad-media-editor-row-preview";
+        preview.textContent = `${previewValue.text || "—"}${previewValue.truncated ? "…" : ""}`;
+        preview.title = ZH_BROWSER ? "点击展开此分段" : "Click to expand this segment";
+        preview.hidden = expanded;
+        const editor = document.createElement("div");
+        editor.className = "ad-guide-prompt-editor ad-media-editor-text";
+        editor.contentEditable = "true";
+        editor.spellcheck = false;
+        editor.dataset.placeholder = `Segment ${index + 1}`;
+        editor.__adGuidePromptNode = node;
+        editor.hidden = !expanded;
+        renderPromptDoc(node, editor, doc);
+        const choose = () => selectMediaEditorRow(node, editor, index);
+        installMediaEditorPromptInteractions(node, editor, textCell, choose);
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "ad-media-editor-row-toggle";
+        toggle.textContent = expanded ? (ZH_BROWSER ? "收起" : "Collapse") : (ZH_BROWSER ? "展开" : "Expand");
+        toggle.title = expanded
+            ? (ZH_BROWSER ? "收起此分段" : "Collapse this segment")
+            : (ZH_BROWSER ? "展开此分段" : "Expand this segment");
+        toggle.addEventListener("pointerdown", (event) => event.stopPropagation());
+        toggle.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setMediaEditorRowExpanded(node, index, !expanded);
+        });
+        preview.addEventListener("pointerdown", (event) => event.stopPropagation());
+        preview.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setMediaEditorRowExpanded(node, index, true);
+        });
+        textCell.append(preview, editor, toggle);
+        row.append(materialCell, textCell);
+        table.append(row);
+        node.__adMediaEditorRows.push({ element: row, materialCell, textCell, preview, editor, index });
+    });
+    for (const row of node.__adMediaEditorRows) row.element.classList.toggle("is-active", row.index === active);
+    if (expandedRows.has(active)) selectMediaEditorRow(node, node.__adMediaEditorRows[active]?.editor, active);
+    else node.__adGuideEditor = null;
+    updateMediaEditorMaterialCells(node);
+    resizeMediaEditorNode(node);
+}
+
+function addMediaEditorRow(node) {
+    if (node.__adGuideEditor) syncPromptFromEditor(node, false);
+    const docs = ensureStagePromptDocs(node);
+    docs.push(clonePromptDoc({ text: "", parts: [] }));
+    node.properties[STAGE_PROMPT_DOCS_PROP] = docs;
+    node.properties[STAGE_PROMPT_INDEX_PROP] = docs.length - 1;
+    mediaEditorExpandedRows(node).add(docs.length - 1);
+    renderMediaEditorRows(node);
+    node.__adMediaEditorRows.at(-1)?.editor?.focus();
+    window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(node.id) } }));
+    app.graph?.change?.();
+}
+
+function removeMediaEditorRow(node) {
+    if (node.__adGuideEditor) syncPromptFromEditor(node, false);
+    const docs = ensureStagePromptDocs(node);
+    if (docs.length <= 1) return;
+    const index = Math.max(0, Math.min(docs.length - 1, Number(node.properties[STAGE_PROMPT_INDEX_PROP]) || 0));
+    docs.splice(index, 1);
+    node.__adMediaEditorExpandedRows = new Set(
+        [...mediaEditorExpandedRows(node)]
+            .filter((rowIndex) => rowIndex !== index)
+            .map((rowIndex) => rowIndex > index ? rowIndex - 1 : rowIndex),
+    );
+    node.properties[STAGE_PROMPT_DOCS_PROP] = docs;
+    node.properties[STAGE_PROMPT_INDEX_PROP] = Math.min(index, docs.length - 1);
+    renderMediaEditorRows(node);
+    window.dispatchEvent(new CustomEvent(MEDIA_RELAY_EVENT, { detail: { nodeId: Number(node.id) } }));
+    app.graph?.change?.();
+}
+
+function syncMediaEditorPromptsToTarget(editorNode, targetNode) {
+    if (!isMediaEditorNode(editorNode) || !isStagePromptTarget(targetNode)) return;
+    if (editorNode.__adGuideEditor) syncPromptFromEditor(editorNode, false);
+    const docs = ensureStagePromptDocs(editorNode).map(clonePromptDoc);
+    const index = Math.max(0, Math.min(docs.length - 1, Number(targetNode.properties?.[STAGE_PROMPT_INDEX_PROP]) || 0));
+    targetNode.properties ||= {};
+    targetNode.properties[STAGE_PROMPT_DOCS_PROP] = docs;
+    targetNode.properties[STAGE_PROMPT_INDEX_PROP] = index;
+    targetNode.properties[PROMPT_DOC_PROP] = docs[index];
+    setConfiguredWidgetValue(targetNode, "prompt", docs[index].text);
+    updateStagePromptsWidget(targetNode);
+    renderEditorFromNode(targetNode, true);
+    updateStagePromptBar(targetNode);
+}
+
 function updateStagePromptsWidget(node) {
-    if (!isMulTarget(node)) return;
+    if (!isMultiPromptNode(node)) return;
     const docs = ensureStagePromptDocs(node);
     const widget = getWidget(node, "stage_prompts");
     if (widget) {
-        widget.value = JSON.stringify(docs.map((doc) => String(doc.text || "")));
+        widget.value = JSON.stringify(docs.map((doc) => getWidget(node, "single_stage_time")
+            ? { prompt: String(doc.text || ""), single_stage_time: doc.single_stage_time }
+            : String(doc.text || "")));
         if (widget._state) widget._state.value = widget.value;
     }
 }
 
 function stagePromptMapping(node) {
     const docs = ensureStagePromptDocs(node);
+    const total = getWidget(node, "single_stage_time")
+        ? `Total：${docs.reduce((value, doc) => value + doc.single_stage_time, 0)}s`
+        : "";
     const index = Number(node.properties[STAGE_PROMPT_INDEX_PROP]) || 0;
     const doc = docs[index];
     const stageDataConnected = Boolean(stageDataLink(node));
@@ -2796,11 +3712,32 @@ function stagePromptMapping(node) {
         counts[type] += 1;
         values.push(`${labels[type]} ${Number(part.ordinal) || "?"}→${names[type]} ${counts[type]}`);
     }
-    return values.join("  ·  ");
+    const mapping = values.join("  ·  ");
+    return [total, mapping].filter(Boolean).join("  ｜  ");
+}
+
+function syncFlowStageTotal(node, total) {
+    if (!getWidget(node, "single_stage_time")) return;
+    const input = (node.inputs || []).find((item) => ["stage_info", "stage_info_data1"].includes(String(item?.name || "")));
+    if (input?.link == null) return;
+    const graph = node.graph || app.graph;
+    const link = graphLinkValues(graph).find((item) => String(item?.id) === String(input.link));
+    const source = link ? graph?.getNodeById?.(Number(link.origin_id)) : null;
+    if (String(source?.comfyClass || source?.type || "") !== FLOW_STAGE_BEGIN_CLASS) return;
+    const widget = getWidget(source, "total");
+    if (!widget || Number(widget.value) === total) return;
+    widget.value = total;
+    if (widget._state) widget._state.value = total;
+    const stageIndex = getWidget(source, "stage_index");
+    if (stageIndex && Number(stageIndex.value) > total) {
+        stageIndex.value = total;
+        if (stageIndex._state) stageIndex._state.value = total;
+    }
+    source.setDirtyCanvas?.(true, true);
 }
 
 function updateStagePromptBar(node) {
-    if (!isMulTarget(node) || !node.__adGuideStagePromptBar) return;
+    if (!isStagePromptTarget(node) || !node.__adGuideStagePromptBar) return;
     const docs = ensureStagePromptDocs(node);
     const index = Number(node.properties[STAGE_PROMPT_INDEX_PROP]) || 0;
     node.__adGuideStagePromptLabel.textContent = `${index + 1} / ${docs.length}`;
@@ -2808,7 +3745,54 @@ function updateStagePromptBar(node) {
     node.__adGuideStagePromptNext.disabled = index >= docs.length - 1;
     node.__adGuideStagePromptDelete.disabled = docs.length <= 1;
     node.__adGuideStagePromptMapping.textContent = stagePromptMapping(node);
+    const stageTime = getWidget(node, "single_stage_time");
+    if (stageTime) {
+        stageTime.value = docs[index].single_stage_time;
+        if (stageTime._state) stageTime._state.value = stageTime.value;
+    }
+    if (isGuideTarget(node)) {
+        const stageIndex = getWidget(node, "stage_index");
+        if (stageIndex) {
+            stageIndex.value = index + 1;
+            if (stageIndex._state) stageIndex._state.value = stageIndex.value;
+        }
+    }
+    syncFlowStageTotal(node, docs.length);
     updateStagePromptsWidget(node);
+}
+
+function installStageTimeWidgetSync(node) {
+    const widget = getWidget(node, "single_stage_time");
+    if (!widget || widget.__adGuideStageTimeSyncInstalled) return;
+    widget.__adGuideStageTimeSyncInstalled = true;
+    const original = widget.callback;
+    widget.callback = function stageTimeChanged(value) {
+        const result = original?.apply(this, arguments);
+        const docs = ensureStagePromptDocs(node);
+        const index = Math.max(0, Math.min(docs.length - 1, Number(node.properties?.[STAGE_PROMPT_INDEX_PROP]) || 0));
+        const stageTime = Math.min(MAX_STAGE_TIME, Math.max(MIN_STAGE_TIME, Math.round(Number(value) || DEFAULT_STAGE_TIME)));
+        docs[index].single_stage_time = stageTime;
+        widget.value = stageTime;
+        if (widget._state) widget._state.value = stageTime;
+        node.properties[STAGE_PROMPT_DOCS_PROP] = docs;
+        updateStagePromptBar(node);
+        node.setDirtyCanvas?.(true, true);
+        app.graph?.change?.();
+        return result;
+    };
+}
+
+function installGuideStageIndexSync(node) {
+    if (!isGuideTarget(node)) return;
+    const widget = getWidget(node, "stage_index");
+    if (!widget || widget.__adGuideStageIndexSync) return;
+    widget.__adGuideStageIndexSync = true;
+    const original = widget.callback;
+    widget.callback = function guideStageIndexChanged(value) {
+        const result = original?.apply(this, arguments);
+        selectStagePrompt(node, Math.max(0, Number(value) - 1));
+        return result;
+    };
 }
 
 function selectStagePrompt(node, nextIndex) {
@@ -2846,7 +3830,7 @@ function deleteStagePrompt(node) {
 }
 
 function createStagePromptBar(node) {
-    if (!isMulTarget(node)) return null;
+    if (!isStagePromptTarget(node)) return null;
     ensureStagePromptDocs(node);
     const container = document.createElement("div");
     container.className = "ad-guide-stage-prompt-wrap";
@@ -3144,6 +4128,98 @@ function closeMentionMenu(node) {
     if (node) node.__adGuideMentionMenu = null;
 }
 
+function closePromptTagMenu(node) {
+    const menu = node?.__adGuidePromptTagMenu;
+    menu?.element?.remove?.();
+    if (node) node.__adGuidePromptTagMenu = null;
+}
+
+function choosePromptTag(node, option) {
+    const state = node?.__adGuidePromptTagMenu;
+    const range = state?.range;
+    const editor = node?.__adGuideEditor;
+    if (!range || !editor || !editor.contains(range.commonAncestorContainer)) return;
+    range.deleteContents();
+    const fragment = document.createDocumentFragment();
+    fragment.append(makeCaretSentinel());
+    appendTextWithBreaks(fragment, option.value || "");
+    const marker = makeCaretSentinel();
+    fragment.append(marker);
+    range.insertNode(fragment);
+    editor.focus({ preventScroll: true });
+    setCaretAtNode(marker, marker.textContent.length);
+    closePromptTagMenu(node);
+    syncPromptFromEditor(node);
+    pushPromptHistory(node);
+}
+
+function renderPromptTagMenu(node) {
+    const state = node?.__adGuidePromptTagMenu;
+    if (!state) return;
+    const { element, activeIndex } = state;
+    element.textContent = "";
+    const title = document.createElement("div");
+    title.className = "ad-guide-mention-menu-title";
+    title.textContent = "提示词标签";
+    element.append(title);
+    PROMPT_TAG_OPTIONS.forEach((option, index) => {
+        const item = document.createElement("div");
+        item.className = `ad-guide-mention-menu-item ad-guide-prompt-tag-menu-item${index === activeIndex ? " is-active" : ""}`;
+        item.textContent = option.label;
+        item.addEventListener("pointermove", () => {
+            if (!node.__adGuidePromptTagMenu || node.__adGuidePromptTagMenu.activeIndex === index) return;
+            node.__adGuidePromptTagMenu.activeIndex = index;
+            renderPromptTagMenu(node);
+        });
+        item.addEventListener("pointerdown", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            choosePromptTag(node, option);
+        });
+        element.append(item);
+    });
+}
+
+function openPromptTagMenu(node, editor) {
+    if (!isMultiPromptNode(node)) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer) || dialogueBlockAtSelection(editor)) return false;
+    closeMentionMenu(node);
+    closePromptTagMenu(node);
+    const element = document.createElement("div");
+    element.className = "ad-guide-mention-menu ad-guide-prompt-tag-menu";
+    applyNativeEditorTheme(element);
+    document.body.append(element);
+    node.__adGuidePromptTagMenu = { element, range: range.cloneRange(), activeIndex: 0 };
+    renderPromptTagMenu(node);
+    positionMentionMenu(element, editor);
+    return true;
+}
+
+function handlePromptTagMenuKeydown(node, event) {
+    const state = node?.__adGuidePromptTagMenu;
+    if (!state) return false;
+    if (event.key === "Escape") {
+        closePromptTagMenu(node);
+        return true;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        state.activeIndex = (state.activeIndex + delta + PROMPT_TAG_OPTIONS.length) % PROMPT_TAG_OPTIONS.length;
+        renderPromptTagMenu(node);
+        state.element.querySelector(".is-active")?.scrollIntoView?.({ block: "nearest" });
+        return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+        choosePromptTag(node, PROMPT_TAG_OPTIONS[state.activeIndex]);
+        return true;
+    }
+    if (event.key.length === 1) closePromptTagMenu(node);
+    return false;
+}
+
 function dialogueBlockAtSelection(editor) {
     const selection = window.getSelection?.();
     if (!selection || !selection.rangeCount) return null;
@@ -3188,25 +4264,6 @@ function exitDialogueBlock(node, editor, block) {
     const index = text.indexOf(CARET_SENTINEL);
     editor.focus({ preventScroll: true });
     setCaretAtNode(marker, index >= 0 ? index + CARET_SENTINEL.length : text.length);
-    closeMentionMenu(node);
-    return true;
-}
-
-function insertDialogueBlockAtSelection(node, editor) {
-    const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !editor) return false;
-    const range = selection.getRangeAt(0);
-    if (!editor.contains(range.commonAncestorContainer)) return false;
-    if (dialogueBlockAtSelection(editor)) return false;
-    range.deleteContents();
-    const before = makeCaretSentinel();
-    const block = makeDialogueBlock("");
-    const after = makeCaretSentinel();
-    const fragment = document.createDocumentFragment();
-    fragment.append(before, block, after);
-    range.insertNode(fragment);
-    editor.focus({ preventScroll: true });
-    setCaretAtEndOfNode(block);
     closeMentionMenu(node);
     return true;
 }
@@ -3425,8 +4482,11 @@ function openMentionMenu(node, editor) {
 }
 
 function syncMentionMenuToCaret(node, editor) {
-    closeMentionMenu(node);
-    return false;
+    if (!editor || !isReferenceMode(node) || isMediaEditorNode(node)) {
+        closeMentionMenu(node);
+        return false;
+    }
+    return openMentionMenu(node, editor);
 }
 
 function setWidgetOption(widget, key, value) {
@@ -3710,7 +4770,7 @@ function setConditionalWidgetVisible(node, widget, visible) {
 }
 
 function syncModeWidgets(node) {
-    const changed = ["width", "height", "length", "ref_image_size"]
+    const changed = ["width", "height", "length", "single_stage_time", "ref_image_size"]
         .map((name) => setConditionalWidgetVisible(node, getWidget(node, name), true))
         .some(Boolean);
     if (changed) {
@@ -3724,10 +4784,10 @@ function syncModeWidgets(node) {
 
 function syncSecondPassWidgets(node, mode = String(getWidgetValue(node, isRef2RefineTarget(node) ? "refine_mode" : "second_pass_mode", "None"))) {
     if (!isMulTarget(node) && !isRef2RefineTarget(node)) return false;
-    const refineEnabled = mode === "refine";
-    const latentScaleEnabled = mode === "latent_scale";
+    const refineEnabled = mode === "refine" || mode === "pixel_refine";
+    const latentScaleEnabled = mode === "latent_scale" || mode === "latent_refine";
     const changed = [
-        ...["refine_model", "refine_denoise", "refine_steps"]
+        ...["refine_model", "upscale_output_scale", "refine_denoise"]
             .map((name) => setConditionalWidgetVisible(node, getWidget(node, name), refineEnabled)),
         ...["latent_model", "latent_scale", "split_step", "low_sigma_start_step"]
             .map((name) => setConditionalWidgetVisible(node, getWidget(node, name), latentScaleEnabled)),
@@ -3740,6 +4800,34 @@ function syncSecondPassWidgets(node, mode = String(getWidgetValue(node, isRef2Re
         app.graph?.setDirtyCanvas?.(true, true);
     }
     return changed;
+}
+
+function migrateRefineWidgets(node, info) {
+    const values = info?.widgets_values;
+    const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
+    const modeIndex = widgets.findIndex((widget) => widget?.name === "refine_mode");
+    if (Array.isArray(values) && modeIndex >= 0) {
+        if (values[modeIndex] === "refine") values[modeIndex] = "pixel_refine";
+        if (values[modeIndex] === "latent_scale") values[modeIndex] = "latent_refine";
+    }
+    const scaleIndex = widgets.findIndex((widget) => widget?.name === "upscale_output_scale");
+    if (!Array.isArray(values) || scaleIndex < 0) return;
+
+    if (values.length === widgets.length + 1) {
+        values.splice(scaleIndex + 2, 1);
+        return;
+    }
+    const oldDenoise = values[scaleIndex];
+    const oldSteps = values[scaleIndex + 1];
+    const oldLatentModel = values[scaleIndex + 2];
+    if (
+        values.length === widgets.length
+        && typeof oldDenoise === "number"
+        && Number.isInteger(oldSteps)
+        && typeof oldLatentModel === "string"
+    ) {
+        values.splice(scaleIndex, 2, 1.0, oldDenoise);
+    }
 }
 
 function reorderMulWidgets(node) {
@@ -3776,9 +4864,17 @@ function installSecondPassWidgetSync(node) {
 function syncOnePassWidgets(node, enabled = getWidgetValue(node, "one_pass_sample", true)) {
     if (!isRef2GenerateTarget(node) && !isFl2GenerateTarget(node)) return false;
     const visible = enabled !== false && String(enabled).toLowerCase() !== "false";
-    const changed = [getWidget(node, "seed"), seedControlWidget(node)]
-        .map((widget) => setConditionalWidgetVisible(node, widget, visible))
-        .some(Boolean);
+    const widgets = [getWidget(node, "seed"), seedControlWidget(node)];
+    const changes = [];
+    if (isRef2GenerateTarget(node)) {
+        widgets.push(
+            getWidget(node, "sampling_profile"),
+            getWidget(node, "VAE_TILE"),
+            getWidget(node, "latent_sample_tile"),
+        );
+    }
+    changes.push(...widgets.map((widget) => setConditionalWidgetVisible(node, widget, visible)));
+    const changed = changes.some(Boolean);
     if (changed) {
         node._widgetSlotsDirty = true;
         node.setDirtyCanvas?.(true, true);
@@ -4426,11 +5522,16 @@ function insertTextWithMentionChips(node, editor, text) {
 
 function ensurePromptEditor(node) {
     if (node.__adGuideEditor) {
+        prunePromptDomWidgets(node, node.__adGuideDomWidget);
         preparePromptEditorForUndo(node.__adGuideEditor);
         normalizeEditorMentionTags(node);
         return;
     }
     if (typeof document === "undefined" || typeof node.addDOMWidget !== "function") return;
+    prunePromptDomWidgets(node);
+    node.__adGuideEditorWrap?.remove?.();
+    node.__adGuideEditorWrap = null;
+    node.__adGuideDomWidget = null;
     ensurePromptUndoRedoShield();
     patchLiteGraphPromptProcessKey();
     const widget = getWidget(node, "prompt");
@@ -4455,24 +5556,23 @@ function ensurePromptEditor(node) {
     editor.dataset.placeholder = isReferenceMode(node) ? TEXT.referencePromptPlaceholder : TEXT.promptPlaceholder;
     editor.spellcheck = false;
     editor.addEventListener("beforeinput", (event) => {
-        if (node.__adGuideDialogueHashHandled) {
-            node.__adGuideDialogueHashHandled = false;
+        if (node.__adGuidePromptTagHashHandled) {
+            node.__adGuidePromptTagHashHandled = false;
             event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation?.();
             return;
         }
-        if (event.inputType === "insertText" && ["#", "\uFF03"].includes(event.data) && !isMaterialHashContext(editor) && insertDialogueBlockAtSelection(node, editor)) {
+        if (event.inputType === "insertText" && ["#", "\uFF03"].includes(event.data) && !isMaterialHashContext(editor) && openPromptTagMenu(node, editor)) {
             event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation?.();
-            syncPromptFromEditor(node);
-            pushPromptHistory(node);
             return;
         }
         if (isReferenceMode(node) && event.data === "@") setTimeout(() => syncMentionMenuToCaret(node, editor), 0);
     });
     editor.addEventListener("input", (event) => {
+        closePromptTagMenu(node);
         if (!event?.isComposing && event?.inputType !== "insertCompositionText" && !node.__adGuidePromptComposing) {
             convertTypedMaterialMention(node, editor);
         }
@@ -4500,6 +5600,7 @@ function ensurePromptEditor(node) {
         // appear when the caret is actually inside a freshly typed @ query.
         syncMentionMenuToCaret(node, editor);
     });
+    editor.addEventListener("blur", () => setTimeout(() => closePromptTagMenu(node), 0));
     editor.addEventListener("pointerdown", () => {
         activePromptNode = node;
     }, true);
@@ -4514,18 +5615,21 @@ function ensurePromptEditor(node) {
         }
     }, true);
     editor.addEventListener("keydown", (event) => {
+        if (handlePromptTagMenuKeydown(node, event)) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
         if (handleMentionMenuKeydown(node, event)) {
             event.preventDefault();
             event.stopPropagation();
             return;
         }
-        if (["#", "\uFF03"].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey && !isMaterialHashContext(editor) && insertDialogueBlockAtSelection(node, editor)) {
+        if (["#", "\uFF03"].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey && !isMaterialHashContext(editor) && openPromptTagMenu(node, editor)) {
             event.preventDefault();
             event.stopPropagation();
-            node.__adGuideDialogueHashHandled = true;
-            setTimeout(() => { node.__adGuideDialogueHashHandled = false; }, 0);
-            syncPromptFromEditor(node);
-            pushPromptHistory(node);
+            node.__adGuidePromptTagHashHandled = true;
+            setTimeout(() => { node.__adGuidePromptTagHashHandled = false; }, 0);
             return;
         }
         const dialogue = dialogueBlockAtSelection(editor);
@@ -4766,6 +5870,16 @@ function canonicalRef2GenerateMotionContext(value) {
     return ["None", "22", "39"].includes(mode) ? mode : "22";
 }
 
+function canonicalRef2GenerateMotionPlan(value, legacyMethod = "guide") {
+    const mode = String(value ?? "");
+    if (mode === "None") return "None";
+    if (["guide 22 frames", "guide 39 frames", "native_masked 39 frames"].includes(mode)) return mode;
+    const frames = canonicalRef2GenerateMotionContext(mode);
+    if (frames === "None") return "None";
+    if (frames === "39" && legacyMethod === "native_masked_av") return "native_masked 39 frames";
+    return frames === "39" ? "guide 39 frames" : "guide 22 frames";
+}
+
 function seedControlWidget(node) {
     const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
     const named = widgets.find((widget) => String(widget?.name || "").toLowerCase() === "control_after_generate");
@@ -4785,7 +5899,7 @@ function mulWidgetValuesArray(values) {
         values.prompt,
         values.width,
         values.height,
-        values.length,
+        values.single_stage_time,
         values.ref_image_size,
         values.fps,
         values.motion_context,
@@ -4794,6 +5908,9 @@ function mulWidgetValuesArray(values) {
         values.seed,
         values.seed_control,
         values.stage_prompts,
+        values.sampling_profile,
+        values.VAE_TILE,
+        values.latent_sample_tile,
     ];
 }
 
@@ -4803,15 +5920,18 @@ function currentMulWidgetValues(node) {
         prompt: String(getWidgetValue(node, "prompt", "")),
         width: Number(getWidgetValue(node, "width", 1344)),
         height: Number(getWidgetValue(node, "height", 768)),
-        length: Number(getWidgetValue(node, "length", 124)),
+        single_stage_time: Number(getWidgetValue(node, "single_stage_time", DEFAULT_STAGE_TIME)),
         ref_image_size: Object.prototype.hasOwnProperty.call(OPTION_DEFS.ref_image_size, refImageSize) ? refImageSize : REF_IMAGE_MATCH,
         fps: Number(getWidgetValue(node, "fps", 24)),
-        motion_context: canonicalRef2GenerateMotionContext(getWidgetValue(node, "motion_context", "22")),
+        motion_context: canonicalRef2GenerateMotionPlan(getWidgetValue(node, "motion_context", "guide 22 frames")),
         Auto_split_ref: String(getWidgetValue(node, "Auto_split_ref", "None")),
         one_pass_sample: Boolean(getWidgetValue(node, "one_pass_sample", true)),
         seed: Number(getWidgetValue(node, "seed", 0)),
         seed_control: String(seedControlWidget(node)?.value || "randomize").toLowerCase(),
         stage_prompts: String(getWidgetValue(node, "stage_prompts", "[]")),
+        sampling_profile: String(getWidgetValue(node, "sampling_profile", "auto")),
+        VAE_TILE: String(getWidgetValue(node, "VAE_TILE", "default")),
+        latent_sample_tile: String(getWidgetValue(node, "latent_sample_tile", "None：不分块")),
     };
 }
 
@@ -4878,12 +5998,13 @@ function repairFl2GenerateConfiguredWidgetValues(node, info) {
 function repairConfiguredWidgetValues(node, info) {
     const raw = Array.isArray(info?.widgets_values) ? [...info.widgets_values] : [];
     if (!raw.length) return;
+    const usesStageTime = Boolean(getWidget(node, "single_stage_time"));
 
     const defaults = {
         prompt: "",
         width: 1344,
         height: 768,
-        length: 124,
+        ...(usesStageTime ? { single_stage_time: DEFAULT_STAGE_TIME } : { length: 124 }),
         ...(isFl2Target(node) ? { single_image_position: "auto" } : {}),
         ...(!isFl2Target(node) ? { ref_image_size: REF_IMAGE_MATCH } : {}),
         ...(isChxTarget(node) ? { seed: 0, fps: 24 } : {}),
@@ -4924,8 +6045,9 @@ function repairConfiguredWidgetValues(node, info) {
             prompt,
             width: Number.isFinite(Number(values[2])) ? Number(values[2]) : defaults.width,
             height: Number.isFinite(Number(values[3])) ? Number(values[3]) : defaults.height,
-            length: Math.max(5, Math.round((legacySeconds * 24 - 5) / 17) * 17 + 5),
         };
+        if (usesStageTime) normalized.single_stage_time = legacySeconds;
+        else normalized.length = Math.max(5, Math.round((legacySeconds * 24 - 5) / 17) * 17 + 5);
         if (!isFl2Target(node)) normalized.ref_image_size = defaults.ref_image_size;
     } else if (isFl2Target(node)) {
         const configuredPosition = canonicalOption("single_image_position", values[3]);
@@ -4944,10 +6066,16 @@ function repairConfiguredWidgetValues(node, info) {
             prompt,
             width: Number.isFinite(Number(values[0])) ? Number(values[0]) : defaults.width,
             height: Number.isFinite(Number(values[1])) ? Number(values[1]) : defaults.height,
-            length: Number.isFinite(Number(values[2])) ? Number(values[2]) : defaults.length,
             ref_image_size: Object.prototype.hasOwnProperty.call(OPTION_DEFS.ref_image_size, canonicalOption("ref_image_size", values[3]))
                 ? canonicalOption("ref_image_size", values[3]) : defaults.ref_image_size,
         };
+        if (usesStageTime) {
+            const rawTime = Number(values[2]);
+            normalized.single_stage_time = Math.min(
+                MAX_STAGE_TIME,
+                Math.max(MIN_STAGE_TIME, rawTime > MAX_STAGE_TIME ? Math.round(rawTime / 24) : Math.round(rawTime || DEFAULT_STAGE_TIME)),
+            );
+        } else normalized.length = Number.isFinite(Number(values[2])) ? Number(values[2]) : defaults.length;
         if (isChxTarget(node)) {
             normalized.seed = Number.isFinite(Number(values[4])) ? Number(values[4]) : defaults.seed;
             normalized.fps = Number.isFinite(Number(values[5])) ? Number(values[5]) : defaults.fps;
@@ -5043,29 +6171,40 @@ function repairMulConfiguredWidgetValues(node, info) {
     const source = stored && typeof stored === "object" ? stored : {
         prompt: raw[0], width: raw[1], height: raw[2], length: raw[3], ref_image_size: raw[4],
         fps: raw[5], motion_context: raw[6], Auto_split_ref: raw[7], one_pass_sample: raw[8],
-        seed: raw[9], seed_control: raw[10], stage_prompts: raw[11],
+        seed: raw[9], seed_control: raw[10], stage_prompts: raw[11], continuation_method: raw[12],
     };
+    const rawLegacyContinuation = ["guide", "native_masked_av"].includes(raw[12]) ? raw[12] : null;
+    const legacyContinuation = ["guide", "native_masked_av"].includes(source.continuation_method)
+        ? source.continuation_method : (rawLegacyContinuation || "guide");
+    const optionOffset = rawLegacyContinuation ? 1 : 0;
     const refImageSize = canonicalOption("ref_image_size", source.ref_image_size);
     const autoSplitRef = ["None", "single_long_video_split", "single_long_audio_split"].includes(source.Auto_split_ref)
         ? source.Auto_split_ref : "None";
+    const legacyStageTime = source.single_stage_time ?? (
+        Number.isFinite(Number(source.length)) ? Math.round(Number(source.length) / (Number(source.fps) || 24)) : DEFAULT_STAGE_TIME
+    );
     const values = {
         prompt: configuredDocText ?? String(source.prompt || ""),
         width: Number.isFinite(Number(source.width)) ? Number(source.width) : 1344,
         height: Number.isFinite(Number(source.height)) ? Number(source.height) : 768,
-        length: Number.isFinite(Number(source.length)) ? Number(source.length) : 124,
+        single_stage_time: Math.min(MAX_STAGE_TIME, Math.max(MIN_STAGE_TIME, Math.round(Number(legacyStageTime) || DEFAULT_STAGE_TIME))),
         ref_image_size: Object.prototype.hasOwnProperty.call(OPTION_DEFS.ref_image_size, refImageSize) ? refImageSize : REF_IMAGE_MATCH,
         fps: Number.isFinite(Number(source.fps)) ? Number(source.fps) : 24,
-        motion_context: canonicalRef2GenerateMotionContext(source.motion_context),
+        motion_context: canonicalRef2GenerateMotionPlan(source.motion_context, legacyContinuation),
         Auto_split_ref: autoSplitRef,
         one_pass_sample: source.one_pass_sample !== false,
         seed: Number.isFinite(Number(source.seed)) ? Number(source.seed) : 0,
         seed_control: SEED_CONTROL_MODES.has(String(source.seed_control || "").toLowerCase())
             ? String(source.seed_control).toLowerCase() : "randomize",
         stage_prompts: typeof source.stage_prompts === "string" ? source.stage_prompts : "[]",
+        sampling_profile: String(source.sampling_profile ?? raw[12 + optionOffset] ?? "auto"),
+        VAE_TILE: String(source.VAE_TILE ?? raw[13 + optionOffset] ?? "default"),
+        latent_sample_tile: String(source.latent_sample_tile ?? raw[14 + optionOffset] ?? "None：不分块"),
     };
     for (const name of [
-        "prompt", "width", "height", "length", "ref_image_size", "fps", "motion_context",
-        "Auto_split_ref", "one_pass_sample", "seed", "stage_prompts",
+        "prompt", "width", "height", "single_stage_time", "ref_image_size", "fps", "motion_context",
+        "Auto_split_ref", "one_pass_sample", "seed", "stage_prompts", "sampling_profile", "VAE_TILE",
+        "latent_sample_tile",
     ]) {
         setConfiguredWidgetValue(node, name, values[name]);
     }
@@ -5079,11 +6218,124 @@ function repairMulConfiguredWidgetValues(node, info) {
     info.widgets_values = mulWidgetValuesArray(values);
 }
 
+function buildMediaEditorUI(node) {
+    if (!isMediaEditorNode(node) || node.__adMediaEditorWidget || typeof node.addDOMWidget !== "function") return;
+    node.properties ||= {};
+    ensureLinks(node);
+    ensureStagePromptDocs(node);
+    if (node.inputs?.[0]) {
+        node.inputs[0].name = "media";
+        node.inputs[0].label = "media";
+        node.inputs[0].type = "IMAGE,VIDEO,AUDIO,LATENT,STRING,ARRAY";
+    }
+    if (node.outputs?.[0]) {
+        node.outputs[0].name = "media";
+        node.outputs[0].label = "media";
+        node.outputs[0].type = "*";
+    }
+    for (const name of ["prompt", "stage_prompts"]) {
+        const widget = getWidget(node, name);
+        if (widget) hideOriginalPromptWidget(widget);
+    }
+
+    const wrap = document.createElement("div");
+    wrap.className = "ad-guide-prompt-editor-wrap ad-media-editor-wrap";
+    const materialTray = document.createElement("div");
+    materialTray.className = "ad-guide-material-tray";
+    const header = document.createElement("div");
+    header.className = "ad-media-editor-header";
+    const materialTitle = document.createElement("span");
+    materialTitle.textContent = "素材";
+    const textTitle = document.createElement("span");
+    textTitle.textContent = "文本";
+    const controls = document.createElement("span");
+    controls.className = "ad-media-editor-controls";
+    const makeButton = (label, title, action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.title = title;
+        button.addEventListener("pointerdown", (event) => event.stopPropagation());
+        button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            action(node);
+        });
+        return button;
+    };
+    controls.append(
+        makeButton("+", "添加一行分段文本", addMediaEditorRow),
+        makeButton("−", "删除当前行", removeMediaEditorRow),
+    );
+    textTitle.append(controls);
+    header.append(materialTitle, textTitle);
+    const table = document.createElement("div");
+    table.className = "ad-media-editor-table";
+    wrap.append(materialTray, header, table);
+    wrap.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    node.__adGuideMaterialTray = materialTray;
+    node.__adMediaEditorTable = table;
+    const widget = node.addDOMWidget("ad_media_editor", "ad_media_editor", wrap, {
+        serialize: false,
+        margin: 10,
+        getMinHeight: () => (Number(materialTray.dataset.trayHeight) || 70)
+            + 34 + Math.max(52, Number(table.scrollHeight) || 52),
+        afterResize: () => {
+            refreshMaterialTray(node);
+            node._widgetSlotsDirty = true;
+        },
+    });
+    if (!widget) return;
+    widget.serialize = false;
+    node.__adMediaEditorWidget = widget;
+    refreshMaterialTray(node);
+    renderMediaEditorRows(node);
+    if ((Number(node.size?.[0]) || 0) < 560) node.setSize?.([560, Math.max(360, Number(node.size?.[1]) || 0)]);
+}
+
+function installMediaEditorNode(nodeType, nodeData) {
+    if (nodeData?.name !== MEDIA_EDITOR_CLASS || nodeType.prototype.__adMediaEditorInstalled) return;
+    nodeType.prototype.__adMediaEditorInstalled = true;
+    const originalCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function onADMediaEditorCreated() {
+        const result = originalCreated?.apply(this, arguments);
+        setTimeout(() => buildMediaEditorUI(this), 0);
+        return result;
+    };
+    const originalConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function onADMediaEditorConfigure(info) {
+        const result = originalConfigure?.apply(this, arguments);
+        this.properties ||= {};
+        if (Array.isArray(info?.properties?.[STAGE_PROMPT_DOCS_PROP])) {
+            this.properties[STAGE_PROMPT_DOCS_PROP] = info.properties[STAGE_PROMPT_DOCS_PROP].map(clonePromptDoc);
+            this.properties[STAGE_PROMPT_INDEX_PROP] = Number(info.properties[STAGE_PROMPT_INDEX_PROP]) || 0;
+        }
+        setTimeout(() => {
+            buildMediaEditorUI(this);
+            refreshMaterialTray(this);
+            renderMediaEditorRows(this);
+        }, 0);
+        return result;
+    };
+    const originalSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function onADMediaEditorSerialize(info) {
+        if (this.__adGuideEditor) syncPromptFromEditor(this, false);
+        const result = originalSerialize?.apply(this, arguments);
+        if (info) {
+            info.properties ||= {};
+            info.properties[STAGE_PROMPT_DOCS_PROP] = ensureStagePromptDocs(this).map(clonePromptDoc);
+            info.properties[STAGE_PROMPT_INDEX_PROP] = Number(this.properties?.[STAGE_PROMPT_INDEX_PROP]) || 0;
+        }
+        return result;
+    };
+}
+
 function installNode(nodeType, nodeData) {
     if (![NODE_CLASS, REF2_GENERATE_NODE_CLASS, FL2_GENERATE_NODE_CLASS].includes(nodeData?.name)) return;
     pruneTransportInputs(nodeData);
-    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adGuideEasyNodeInstalledUI40")) return;
-    nodeType.prototype.__adGuideEasyNodeInstalledUI40 = true;
+    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adGuideEasyNodeInstalledUI41")) return;
+    nodeType.prototype.__adGuideEasyNodeInstalledUI41 = true;
     const originalCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function onNodeCreatedH3Easy() {
         const result = originalCreated?.apply(this, arguments);
@@ -5093,10 +6345,14 @@ function installNode(nodeType, nodeData) {
         ensureLinks(this);
         if (isMulTarget(this)) {
             normalizeMulOutputs(this);
+        }
+        if (isStagePromptTarget(this)) {
             ensureStagePromptDocs(this);
             const stagePromptsWidget = getWidget(this, "stage_prompts");
             if (stagePromptsWidget) hideOriginalPromptWidget(stagePromptsWidget);
+            installStageTimeWidgetSync(this);
             updateStagePromptsWidget(this);
+            installGuideStageIndexSync(this);
         }
         normalizeLinks(this);
         pruneLinksForMode(this);
@@ -5108,6 +6364,7 @@ function installNode(nodeType, nodeData) {
             installSecondPassWidgetSync(this);
             installOnePassWidgetSync(this);
         }
+        if (isGuideTarget(this)) reorderMulInputSlots(this);
         syncModeWidgets(this);
         patchCanvas();
         installQuickCreateCapture(app.canvas);
@@ -5128,6 +6385,10 @@ function installNode(nodeType, nodeData) {
             normalizeMulOutputs(this);
             if (isFl2GenerateTarget(this)) repairFl2GenerateConfiguredWidgetValues(this, info);
             else repairMulConfiguredWidgetValues(this, info);
+        } else {
+            repairConfiguredWidgetValues(this, info);
+        }
+        if (isStagePromptTarget(this)) {
             this.properties ||= {};
             if (Array.isArray(info?.properties?.[STAGE_PROMPT_DOCS_PROP])) {
                 this.properties[STAGE_PROMPT_DOCS_PROP] = info.properties[STAGE_PROMPT_DOCS_PROP].map(clonePromptDoc);
@@ -5136,9 +6397,9 @@ function installNode(nodeType, nodeData) {
             ensureStagePromptDocs(this);
             const stagePromptsWidget = getWidget(this, "stage_prompts");
             if (stagePromptsWidget) hideOriginalPromptWidget(stagePromptsWidget);
+            installStageTimeWidgetSync(this);
             updateStagePromptsWidget(this);
-        } else {
-            repairConfiguredWidgetValues(this, info);
+            installGuideStageIndexSync(this);
         }
         normalizeLinks(this);
         pruneLinksForMode(this);
@@ -5150,6 +6411,7 @@ function installNode(nodeType, nodeData) {
             installSecondPassWidgetSync(this);
             installOnePassWidgetSync(this);
         }
+        if (isGuideTarget(this)) reorderMulInputSlots(this);
         syncModeWidgets(this);
         renderEditorFromNode(this);
         updateStagePromptBar(this);
@@ -5174,6 +6436,7 @@ function installNode(nodeType, nodeData) {
         if (connected && !this.__adGuideVirtualWireClearing && String(input?.name || "") === "media") {
             scheduleNativeMediaConnectionConversion(this, inputIndex, linkInfo);
         }
+        if (["stage_info", "stage_info_data1"].includes(String(input?.name || ""))) updateStagePromptBar(this);
         return result;
     };
 
@@ -5184,7 +6447,7 @@ function installNode(nodeType, nodeData) {
         if (info && this.properties?.[PROMPT_DOC_PROP]) {
             info.properties ||= {};
             info.properties[PROMPT_DOC_PROP] = this.properties[PROMPT_DOC_PROP];
-            if (isMulTarget(this)) {
+            if (isStagePromptTarget(this)) {
                 info.properties[STAGE_PROMPT_DOCS_PROP] = ensureStagePromptDocs(this).map(clonePromptDoc);
                 info.properties[STAGE_PROMPT_INDEX_PROP] = Number(this.properties[STAGE_PROMPT_INDEX_PROP]) || 0;
             }
@@ -5193,6 +6456,7 @@ function installNode(nodeType, nodeData) {
             const values = currentMulWidgetValues(this);
             info.properties ||= {};
             info.properties[REF2_GENERATE_WIDGET_VALUES_PROP] = { ...values };
+            info.widgets_values = mulWidgetValuesArray(values);
         } else if (info && isFl2GenerateTarget(this)) {
             const values = currentFl2GenerateWidgetValues(this);
             info.properties ||= {};
@@ -5203,7 +6467,11 @@ function installNode(nodeType, nodeData) {
                 String(getWidgetValue(this, "prompt", "")),
                 Number(getWidgetValue(this, "width", 1344)),
                 Number(getWidgetValue(this, "height", 768)),
-                Number(getWidgetValue(this, "length", 124)),
+                Number(getWidgetValue(
+                    this,
+                    getWidget(this, "single_stage_time") ? "single_stage_time" : "length",
+                    getWidget(this, "single_stage_time") ? DEFAULT_STAGE_TIME : 124,
+                )),
                 ...(!isFl2Target(this) ? [canonicalOption("ref_image_size", getWidgetValue(this, "ref_image_size", REF_IMAGE_MATCH))] : []),
             ];
         }
@@ -5220,6 +6488,8 @@ function installNode(nodeType, nodeData) {
             installSecondPassWidgetSync(this);
             installOnePassWidgetSync(this);
         }
+        if (isGuideTarget(this)) reorderMulInputSlots(this);
+        installStageTimeWidgetSync(this);
         if (this.__adGuideEditorVersion !== AD_GUIDE_UI_VERSION) repairDetachedPromptEditor(this);
         else if (this.__adGuideCanonicalMentionVersion !== AD_GUIDE_UI_VERSION) normalizeEditorMentionTags(this);
         if (!this.__adGuideEditor && !this.__adGuidePromptInstallPending && !this.__adGuidePromptInstallRetry) installPromptEditorSoon(this);
@@ -5249,8 +6519,8 @@ function installNode(nodeType, nodeData) {
 
 function installRefineNode(nodeType, nodeData) {
     if (nodeData?.name !== REF2_REFINE_NODE_CLASS) return;
-    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adGuideRefineNodeInstalledUI40")) return;
-    nodeType.prototype.__adGuideRefineNodeInstalledUI40 = true;
+    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adGuideRefineNodeInstalledUI41")) return;
+    nodeType.prototype.__adGuideRefineNodeInstalledUI41 = true;
 
     const originalCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function onNodeCreatedH3Refine() {
@@ -5262,7 +6532,8 @@ function installRefineNode(nodeType, nodeData) {
     };
 
     const originalConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function onConfigureH3Refine() {
+    nodeType.prototype.onConfigure = function onConfigureH3Refine(info) {
+        migrateRefineWidgets(this, info);
         const result = originalConfigure?.apply(this, arguments);
         normalizeRef2StageInfoInput(this);
         normalizeMulOutputs(this);
@@ -5292,8 +6563,10 @@ function pruneLegacyFlowStageMediaLinks(node) {
 }
 
 function reorderMulInputSlots(node) {
-    if (!isMulTarget(node) || !Array.isArray(node.inputs)) return false;
-    const order = new Map([["context", 0], ["model", 1], ["stage_info", 2], ["stage_info_data1", 2], ["media", 3]]);
+    if ((!isMulTarget(node) && !isGuideTarget(node)) || !Array.isArray(node.inputs)) return false;
+    const order = isGuideTarget(node)
+        ? new Map([["clip", 0], ["vae", 1], ["audio_vae", 2], ["media", 3]])
+        : new Map([["context", 0], ["model", 1], ["stage_info", 2], ["stage_info_data1", 2], ["media", 3]]);
     const current = [...node.inputs];
     const next = current
         .map((input, index) => ({ input, index }))
@@ -5323,7 +6596,7 @@ function reorderMulInputSlots(node) {
 
 function normalizeFlowStageBeginSlots(node, force = false) {
     if (String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") !== FLOW_STAGE_BEGIN_CLASS) return;
-    if (node.__adFlowStageSlotsNormalizedUI40 && !force) return;
+    if (node.__adFlowStageSlotsNormalizedUI41 && !force) return;
     for (let index = (node.outputs?.length || 0) - 1; index >= 0; index -= 1) {
         if (String(node.outputs[index]?.name || "") === "data") node.removeOutput?.(index);
     }
@@ -5353,7 +6626,7 @@ function normalizeFlowStageBeginSlots(node, force = false) {
     }
     node._widgetSlotsDirty = true;
     node.setDirtyCanvas?.(true, true);
-    node.__adFlowStageSlotsNormalizedUI40 = true;
+    node.__adFlowStageSlotsNormalizedUI41 = true;
 }
 
 function syncFlowStageBeginWidgets(node) {
@@ -5366,22 +6639,22 @@ function syncFlowStageBeginWidgets(node) {
 
 function installFlowStageBeginNode(nodeType, nodeData) {
     if (nodeData?.name !== FLOW_STAGE_BEGIN_CLASS) return;
-    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adFlowStageBeginInstalledUI40")) return;
-    nodeType.prototype.__adFlowStageBeginInstalledUI40 = true;
+    if (Object.prototype.hasOwnProperty.call(nodeType.prototype, "__adFlowStageBeginInstalledUI41")) return;
+    nodeType.prototype.__adFlowStageBeginInstalledUI41 = true;
     const originalCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function onNodeCreatedFlowStageBeginUI40() {
+    nodeType.prototype.onNodeCreated = function onNodeCreatedFlowStageBeginUI41() {
         const result = originalCreated?.apply(this, arguments);
         syncFlowStageBeginWidgets(this);
         return result;
     };
     const originalConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function onConfigureFlowStageBeginUI40() {
+    nodeType.prototype.onConfigure = function onConfigureFlowStageBeginUI41() {
         const result = originalConfigure?.apply(this, arguments);
         syncFlowStageBeginWidgets(this);
         return result;
     };
     const originalDraw = nodeType.prototype.onDrawForeground;
-    nodeType.prototype.onDrawForeground = function onDrawForegroundFlowStageBeginUI40() {
+    nodeType.prototype.onDrawForeground = function onDrawForegroundFlowStageBeginUI41() {
         const result = originalDraw?.apply(this, arguments);
         syncFlowStageBeginWidgets(this);
         return result;
@@ -5431,6 +6704,21 @@ function install() {
     patchGraphToPrompt();
     patchEditorKeyHandling();
     installNativeThemeWatcher();
+    window.addEventListener(MEDIA_RELAY_EVENT, (event) => {
+        requestMentionPreviewRefresh();
+        const relayId = Number(event?.detail?.nodeId);
+        if (!Number.isFinite(relayId)) return;
+        const relayNode = app.graph?.getNodeById?.(relayId) || { id: relayId };
+        if (isMediaEditorNode(relayNode) && !event?.detail?.promptsOnly) {
+            normalizeLinks(relayNode);
+            refreshMaterialTray(relayNode);
+            renderMediaEditorRows(relayNode);
+        }
+        for (const target of app.graph?._nodes || []) {
+            if (!isTarget(target) || !mediaRelayIds(target).some((value) => Number(value) === relayId)) continue;
+            syncMediaRelayToTarget(target, relayNode, Boolean(event?.detail?.removed));
+        }
+    });
     for (const delay of [0, 100, 500, 1200]) setTimeout(() => patchCanvas(), delay);
     setTimeout(() => installQuickCreateCapture(app.canvas), 0);
     setTimeout(() => installQuickCreateCapture(app.canvas), 250);
@@ -5455,8 +6743,10 @@ function install() {
         box-shadow: inset 0 0 0 1px var(--ad-guide-native-widget-outline, rgba(255,255,255,.12));
       }
       .ad-guide-material-empty {
-        display: flex; align-items: center; justify-content: center; min-width: 100%; padding: 0 10px; box-sizing: border-box;
-        color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.42)); font-size: 11px; text-align: center; white-space: nowrap;
+        display: flex; align-items: center; justify-content: flex-start; min-width: 100%; padding: 0 10px; box-sizing: border-box;
+        color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.42));
+        font-family: Consolas, "Courier New", monospace; font-size: var(--ad-guide-native-widget-text-size, var(--comfy-textarea-font-size, 12px));
+        font-weight: 400; line-height: normal; text-align: left; white-space: nowrap;
       }
       .ad-guide-material-card {
         position: relative; display: grid; grid-template-rows: 42px 15px; flex: 0 0 54px; width: 54px; min-width: 54px; height: 62px; padding: 2px;
@@ -5479,7 +6769,7 @@ function install() {
       .ad-guide-stage-prompt-bar button { width: 30px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: var(--ad-guide-native-widget-bg, var(--comfy-input-bg, #222)); color: var(--ad-guide-native-widget-text, #ddd); box-shadow: inset 0 0 0 1px var(--ad-guide-native-widget-outline, rgba(255,255,255,.16)); cursor: pointer !important; }
       .ad-guide-stage-prompt-bar button:disabled { opacity: .35; }
       .ad-guide-stage-prompt-label { min-width: 54px; color: var(--ad-guide-native-widget-text, #ddd); font: 12px/24px system-ui, sans-serif; text-align: center; }
-      .ad-guide-stage-prompt-mapping { min-width: 0; height: 17px; overflow: hidden; color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.56)); font: 10px/17px system-ui, sans-serif; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+      .ad-guide-stage-prompt-mapping { min-width: 0; height: 17px; overflow: hidden; color: var(--ad-guide-native-widget-text, #ddd); font: 10px/17px system-ui, sans-serif; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
       .ad-guide-prompt-editor {
         --ad-guide-prompt-text-size: var(--ad-guide-native-widget-text-size, var(--comfy-textarea-font-size, 12px));
         display: block; flex: 1 1 auto; width: 100%; height: auto; min-width: 0; min-height: 104px; max-height: none; box-sizing: border-box;
@@ -5521,6 +6811,11 @@ function install() {
         display: flex; align-items: center; justify-content: center; cursor: pointer !important;
         color: var(--ad-guide-native-widget-text, var(--input-text, #ddd));
       }
+      .ad-guide-material-folder {
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border: 0;
+        color: var(--ad-guide-native-widget-text, var(--input-text, #ddd)); cursor: pointer !important;
+      }
+      .ad-guide-material-folder:disabled { opacity: .55; cursor: wait !important; }
       .ad-guide-material-card.is-dragging { cursor: grabbing !important; }
       .ad-guide-mention-chip-thumb { display: inline-block; width: 16px; height: 16px; margin-right: 2px; object-fit: cover; border-radius: 3px; vertical-align: -2px; background: rgba(255,255,255,.12); user-select: none; }
       .ad-guide-mention-chip-thumb.is-image, .ad-guide-mention-menu-thumb.is-image { background: #5aa9f0; }
@@ -5541,17 +6836,39 @@ function install() {
       .ad-guide-mention-menu-empty { padding: 9px 10px; color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.62)); font-size: 12px; }
       .ad-guide-mention-menu-item { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 8px; align-items: center; min-height: 42px; padding: 4px 7px; border-radius: 6px; cursor: pointer; }
       .ad-guide-mention-menu-item.is-active, .ad-guide-mention-menu-item:hover { background: rgba(160,255,178,.15); }
+      .ad-guide-prompt-tag-menu { width: 198px; }
+      .ad-guide-prompt-tag-menu-item { display: block; min-height: 0; padding: 7px 9px; font-size: 13px; }
       .ad-guide-mention-menu-thumb { display: block; width: 36px; height: 36px; object-fit: cover; border-radius: 5px; background: rgba(255,255,255,.1); }
       .ad-guide-mention-menu-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
-      .ad-guide-mention-menu-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.55)); font-size: 11px; }
+       .ad-guide-mention-menu-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.55)); font-size: 11px; }
+       .ad-media-editor-wrap { gap: 6px; overflow: visible; contain: layout paint; }
+       .ad-media-editor-header, .ad-media-editor-row { display: grid; grid-template-columns: minmax(118px, 28%) minmax(0, 72%); width: 100%; box-sizing: border-box; }
+       .ad-media-editor-header { min-height: 28px; align-items: center; border: 1px solid var(--ad-guide-native-widget-outline, rgba(255,255,255,.16)); background: var(--ad-guide-native-widget-bg, #222); color: var(--ad-guide-native-widget-text, #ddd); font: 600 12px/26px system-ui, sans-serif; }
+       .ad-media-editor-header > span { position: relative; padding: 0 8px; box-sizing: border-box; }
+       .ad-media-editor-header > span + span, .ad-media-editor-text-cell { border-left: 1px solid var(--ad-guide-native-widget-outline, rgba(255,255,255,.16)); }
+       .ad-media-editor-controls { position: absolute; right: 4px; top: 2px; display: inline-flex; gap: 3px; }
+       .ad-media-editor-controls button { width: 24px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: var(--ad-guide-native-widget-bg, #222); color: var(--ad-guide-native-widget-text, #ddd); box-shadow: inset 0 0 0 1px var(--ad-guide-native-widget-outline, rgba(255,255,255,.18)); cursor: pointer !important; }
+       .ad-media-editor-table { display: flex; flex-direction: column; width: 100%; overflow: visible; }
+       .ad-media-editor-row { min-height: 52px; border: 1px solid var(--ad-guide-native-widget-outline, rgba(255,255,255,.14)); border-top: 0; }
+       .ad-media-editor-row.is-expanded { min-height: 96px; }
+       .ad-media-editor-row.is-active { box-shadow: inset 0 0 0 1px rgba(0,226,187,.52); }
+       .ad-media-editor-material-cell { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 4px; min-width: 0; padding: 6px; box-sizing: border-box; background: var(--ad-guide-native-widget-bg, #222); }
+       .ad-media-editor-ref { display: flex; align-items: center; gap: 3px; max-width: 100%; height: 24px; padding: 2px 5px; box-sizing: border-box; overflow: hidden; border-radius: 4px; background: rgba(255,136,34,.10); color: #ff9a40; font: 11px/20px system-ui, sans-serif; white-space: nowrap; }
+       .ad-media-editor-ref .ad-guide-mention-chip-thumb { flex: 0 0 16px; margin: 0; }
+       .ad-media-editor-empty-ref { margin: auto; color: var(--ad-guide-native-widget-muted, rgba(255,255,255,.32)); }
+       .ad-media-editor-text-cell { position: relative; min-width: 0; min-height: 52px; box-sizing: border-box; background: var(--ad-guide-native-widget-bg, #222); }
+       .ad-media-editor-row-preview { min-height: 52px; max-height: 96px; padding: 7px 48px 7px 7px; box-sizing: border-box; overflow: hidden; color: var(--ad-guide-native-widget-text, #ddd); font: 12px/1.45 system-ui, sans-serif; white-space: pre-wrap; cursor: pointer !important; }
+       .ad-media-editor-row-preview[hidden], .ad-media-editor-text[hidden] { display: none !important; }
+       .ad-media-editor-row-toggle { position: absolute; top: 5px; right: 5px; min-width: 38px; height: 22px; padding: 0 5px; border: 0; border-radius: 4px; background: rgba(0,226,187,.12); color: rgba(112,255,224,.9); font: 11px/18px system-ui, sans-serif; cursor: pointer !important; }
+       .ad-media-editor-text { min-height: 96px; padding: 7px 48px 7px 7px !important; overflow: visible !important; background: var(--ad-guide-native-widget-bg, #222); }
     `;
     document.head.append(style);
 }
 
-if (!globalThis.__AD_MINIMAX_GUIDE_UI40_REGISTERED__) {
-    globalThis.__AD_MINIMAX_GUIDE_UI40_REGISTERED__ = true;
+if (!globalThis.__AD_MINIMAX_GUIDE_UI41_REGISTERED__) {
+    globalThis.__AD_MINIMAX_GUIDE_UI41_REGISTERED__ = true;
     app.registerExtension({
-        name: "ADMiniMaxGuide.ui40",
+        name: "ADMiniMaxGuide.ui41",
         setup() {
             install();
         },
@@ -5568,10 +6885,16 @@ if (!globalThis.__AD_MINIMAX_GUIDE_UI40_REGISTERED__) {
                 reorderMulInputSlots(node);
                 installOnePassWidgetSync(node);
             }
+            if (isGuideTarget(node)) reorderMulInputSlots(node);
             if (isRef2RefineTarget(node)) {
                 normalizeRef2StageInfoInput(node);
                 normalizeMulOutputs(node);
                 installSecondPassWidgetSync(node);
+            }
+            if (isMediaEditorNode(node)) {
+                buildMediaEditorUI(node);
+                refreshMaterialTray(node);
+                renderMediaEditorRows(node);
             }
         },
         beforeRegisterNodeDef(nodeType, nodeData) {
@@ -5581,6 +6904,7 @@ if (!globalThis.__AD_MINIMAX_GUIDE_UI40_REGISTERED__) {
             installOutputNode(nodeType, nodeData);
             installFlowStageBeginNode(nodeType, nodeData);
             installRefineNode(nodeType, nodeData);
+            installMediaEditorNode(nodeType, nodeData);
             installNode(nodeType, nodeData);
         },
     });

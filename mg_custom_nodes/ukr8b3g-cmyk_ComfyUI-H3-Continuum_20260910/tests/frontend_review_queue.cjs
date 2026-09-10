@@ -68,6 +68,8 @@ function environment() {
       widgets:Object.entries(v).map(([name,value])=>({name,value,type:typeof value==='number'?'number':'combo',options:{values:[]},computeSize:()=>[120,20]})),
       addWidget(type,name,value,callback,options){const w={type,name,value,callback,options:options||{},computeSize:()=>[120,20]};this.widgets.push(w);return w;},
       addCustomWidget(w){this.widgets.push(w);return w;},setDirtyCanvas(){},
+      getWidgetFromSlot(slot){return this.widgets.find(w=>w.name===slot.widget?.name);},
+      getSlotFromWidget(widget){return this.inputs.find(slot=>slot.widget?.name===widget?.name);},
       serialize(){return {widgets_values:this.widgets.map(w=>w.value)};},
       configure(info){info.widgets_values.forEach((v,i)=>{if(this.widgets[i])this.widgets[i].value=v;});}
     };
@@ -369,6 +371,75 @@ await test('same completed revision reuse exits setup without new Sampling',asyn
  assert(!n.__h3ContinuumModeSetup);assert(e.visible(n,'Try this chunk again'));assert(e.visible(n,'Start again from Chunk 1'));
  assert(!e.visible(n,'Use it and continue'));assert.equal(e.submissions.length,1);
 });
+await test('Issue 20 store persistence excludes transient UI across reloads',async e=>{
+ // Model the compact store serializer, which does NOT call node.serialize().
+ // The flag contract is from ComfyUI_frontend 77bdc5d LGraphNode.ts.
+ // Real Continuum UI creation/refresh runs through the existing environment.
+ const n=e.makeNode();await e.load(n,null);
+ const persistent=()=>n.widgets.filter(w=>!w.__h3ContinuumProductionTransient);
+ const values=()=>persistent().map(w=>structuredClone(w.value));
+ const storeSave=()=>{
+  const widgets=n.widgets.filter(w=>w.serialize!==false);
+  return {widgets_values:widgets.map(w=>structuredClone(w.value)),
+   widgets_values_named:Object.fromEntries(widgets.map(w=>[w.name,structuredClone(w.value)]))};
+ };
+ // Array-only projection of Core's forceInput migration in litegraphUtil.ts.
+ // A leaked history value makes 30 values look like a 31-value legacy payload.
+ const migrate=(widgets,saved)=>{
+  const defs=[{name:'sequence_prompt',forceInput:true},
+   ...persistent().filter(w=>w.name!=='control_after_generate')
+    .map(w=>({name:w.name,control_after_generate:w.name==='base_seed'}))];
+  const names=new Set(widgets.map(w=>w.name));
+  const skipped=new Set(widgets.filter(w=>w.serialize===false).map(w=>w.name));
+  const mask=defs.filter(d=>names.has(d.name)||d.forceInput).flatMap(d=>
+   skipped.has(d.name)?[]:d.control_after_generate?[!!d.forceInput,false]:[!!d.forceInput]);
+  const count=widgets.filter(w=>w.serialize!==false).length;
+  if(!mask.includes(true)&&saved.length===count)return saved;
+  const compacted=saved.filter((_,i)=>widgets[i]?.serialize!==false);
+  const aligned=compacted.length===mask.length?compacted:saved.length===mask.length?saved:undefined;
+  return aligned?aligned.filter((_,i)=>!mask[i]):saved;
+ };
+ const verify=async()=>{
+  const expected=values();assert.equal(expected.length,30);
+  const saved=storeSave();
+  assert.equal(saved.widgets_values.length,30,'UI-only history leaked into workflow persistence');
+  assert.deepEqual(saved.widgets_values,expected);
+  assert.deepEqual(n.serialize().widgets_values,expected);
+  assert.deepEqual(Object.keys(saved.widgets_values_named),persistent().map(w=>w.name));
+  for(const w of n.widgets.filter(w=>w.__h3ContinuumProductionTransient)){
+   assert.equal(w.serialize,false,`${w.name}: workflow exclusion`);
+   assert.equal(w.options?.serialize,false,`${w.name}: API exclusion`);
+  }
+  const apiBefore=await e.inputs(n);
+  assert(!Object.hasOwn(apiBefore,'Render History / Takes'));
+  for(const named of [false,true]){
+   for(let i=0;i<3;i++){
+    const data=JSON.parse(JSON.stringify(storeSave()));
+    const canonical=persistent();
+    const migrated=migrate(canonical,data.widgets_values);
+    assert.deepEqual(migrated,expected);
+    if(named){
+     for(const w of canonical)w.value=structuredClone(data.widgets_values_named[w.name]);
+    }else n.configure({widgets_values:migrated});
+    e.f.configureNode(n);
+    assert.deepEqual(values(),expected);
+    assert.equal(e.w(n,'Prompt Format').value,e.w(n,'prompt_mode').value);
+    assert.equal(e.w(n,'Height').value,e.w(n,'height').value);
+   }
+  }
+  assert.deepEqual(await e.inputs(n),apiBefore);
+ };
+ // Empty history, ordinary settings, expanded controls, Review and completion.
+ e.w(n,'Chunks').callback(6);e.w(n,'Seconds per Chunk').callback(2.5);
+ e.w(n,'Width').callback(640);e.w(n,'Height').callback(768);
+ await verify();
+ e.w(n,'Advanced Settings').callback();await verify();
+ e.w(n,'generation_mode').value='Review Each Chunk';await e.load(n,project(1,6));
+ await verify();e.w(n,'Render History').callback();await verify();
+ e.w(n,'Back to Settings').callback();await verify();
+ e.w(n,'Return to Review').callback();await verify();
+ await e.load(n,project(6,6,'complete'));await verify();
+});
 await test('mode policy and transient UI serialization remain stable',async e=>{
  const n=e.makeNode();e.w(n,'run_storage').value='Off';e.w(n,'Run').callback('Review Each Chunk');
  assert.equal(e.w(n,'run_storage').value,'Save + Auto Resume');e.w(n,'Run').callback('Generate Full Video');
@@ -393,5 +464,63 @@ await test('history catalog preserves lineage eligibility and compact summary',a
  assert.equal(p.canonical_head_revision_id,'r1-g3');
 });
 
+await test('duration sockets map to visible facades without changing Core names or types',async e=>{
+ const n=e.makeNode();
+ for(const [name,type,label] of [['chunks','INT','Chunks'],['chunk_seconds','FLOAT','Seconds per Chunk']]){
+  const slot={name,type,link:null,widget:{name}};n.inputs.push(slot);
+  assert.equal(n.getWidgetFromSlot(slot),e.w(n,label));
+  assert.equal(n.getSlotFromWidget(e.w(n,label)),slot);
+  assert.equal(n.getSlotFromWidget(e.w(n,name)),slot);
+  assert.equal(slot.widget.name,name);assert.equal(slot.type,type);
+  assert(!n.getWidgetFromSlot(slot).hidden);assert(e.w(n,name).hidden);
+ }
+ const other={name:'base_seed',widget:{name:'base_seed'}};n.inputs.push(other);
+ assert.equal(n.getWidgetFromSlot(other),e.w(n,'base_seed'));
+ const getter=n.getWidgetFromSlot;e.f.configureNode(n);assert.equal(n.getWidgetFromSlot,getter);
+ for(const slot of n.inputs.filter(s=>['chunks','chunk_seconds'].includes(s.name))){
+  assert.equal(slot._widget,n.getWidgetFromSlot(slot));
+  assert(!slot._widget.hidden);
+ }
+ // Workflow loading replaces slot objects; configure must bind the new slots.
+ n.inputs=n.inputs.map(s=>({name:s.name,type:s.type,widget:s.widget,link:null}));
+ e.f.configureNode(n);
+ assert.equal(n.inputs[0]._widget,e.w(n,'Chunks'));
+ assert.equal(n.inputs[1]._widget,e.w(n,'Seconds per Chunk'));
+ e.w(n,'generation_mode').value='Review Each Chunk';
+ n.inputs[0].link=42;n.inputs[1].link=43;
+ await e.load(n,project(1));
+ assert(e.visible(n,'Chunks'));assert(e.visible(n,'Seconds per Chunk'));
+ assert.equal(n.widgets[0].name,'Chunks');assert.equal(n.widgets[1].name,'Seconds per Chunk');
+ e.w(n,'Back to Settings').callback();
+ assert.equal(n.widgets[0].name,'Chunks');assert.equal(n.widgets[1].name,'Seconds per Chunk');
+ e.w(n,'Return to Review').callback();
+ assert.equal(n.widgets[0].name,'Chunks');assert.equal(n.widgets[1].name,'Seconds per Chunk');
+ n.inputs[0].link=null;n.inputs[1].link=null;
+ n.__h3ContinuumIntuitiveUxRefresh();n.__h3ContinuumProductionUxRefresh();
+ assert(!e.visible(n,'Chunks'));assert(!e.visible(n,'Seconds per Chunk'));
+});
+await test('duration manual entry and serialized values survive connect disconnect and reload',async e=>{
+ const n=e.makeNode();e.w(n,'Chunks').callback(6);e.w(n,'Seconds per Chunk').callback(2.5);
+ const before=n.serialize();const input={name:'chunks',type:'INT',widget:{name:'chunks'},link:42};
+ n.inputs.push(input);n.__h3ContinuumIntuitiveUxRefresh();
+ assert.equal(e.w(n,'Total Length').value,'From connected inputs');
+ assert.equal(JSON.stringify(n.serialize()),JSON.stringify(before));
+ input.link=null;n.__h3ContinuumIntuitiveUxRefresh();
+ assert.equal(e.w(n,'Total Length').value,'15 seconds');
+ const restored=e.makeNode(313);restored.configure(before);
+ assert.equal(e.w(restored,'chunks').value,6);assert.equal(e.w(restored,'chunk_seconds').value,2.5);
+ const values=await e.inputs(restored);assert.equal(values.chunks,6);assert.equal(values.chunk_seconds,2.5);
+ assert(!Object.hasOwn(values,'Chunks'));assert(!Object.hasOwn(values,'Seconds per Chunk'));
+});
+await test('external duration links remain links through actual review Queue adapter',async e=>{
+ const n=e.makeNode();e.w(n,'chunks').value=1;
+ n.inputs.push({name:'chunks',type:'INT',widget:{name:'chunks'},link:42});
+ e.w(n,'Run').callback('Review Each Chunk');n.__h3ContinuumIntuitiveUxRefresh();
+ assert(!e.w(n,'Chunks').tooltip.includes('Chunks is 1'));
+ const data={output:{[n.id]:{class_type:n.comfyClass,inputs:{...(await e.inputs(n)),chunks:['900',0],chunk_seconds:['901',0]}}},workflow:n.serialize()};
+ await e.api.queuePrompt(0,data);
+ assert.deepEqual(e.submissions.at(-1).data.output[n.id].inputs.chunks,['900',0]);
+ assert.deepEqual(e.submissions.at(-1).data.output[n.id].inputs.chunk_seconds,['901',0]);
+});
 console.log(JSON.stringify(results,null,2));if(results.some(r=>!r.pass))process.exitCode=1;
 })();

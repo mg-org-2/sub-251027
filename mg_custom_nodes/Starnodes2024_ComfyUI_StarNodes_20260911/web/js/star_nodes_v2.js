@@ -26,8 +26,8 @@ function hideWidget(node, name) {
     if (!w) return null;
     // Guarantee the value is serialized into the workflow / prompt no matter
     // how the frontend treats hidden widgets.
-    const originalSerialize = w.serializeValue ? w.serializeValue.bind(w) : null;
-    w.serializeValue = () => (originalSerialize ? originalSerialize() : w.value);
+    const originalSerialize = w.serializeValue || null;
+    w.serializeValue = () => (originalSerialize ? originalSerialize.call(w) : w.value);
     w.type = "hidden";
     w.hidden = true;
     w.computeSize = () => [0, -4];

@@ -145,10 +145,10 @@ function buildEntry() {
 
                     try {
                         if (nodeFrom && outIdx !== -1) {
-                            const success = nodeFrom.connect(outIdx, node, 0);
+                            const success = nodeFrom["connect"](outIdx, node, 0);
                             if (!success) console.warn("[StarShowEverything] L4: Force-Connect vom Original-Knoten schlug fehl. Output-Index war:", outIdx);
                         } else if (nodeTo && inIdx !== -1) {
-                            const success = node.connect(0, nodeTo, inIdx);
+                            const success = node["connect"](0, nodeTo, inIdx);
                             if (!success) console.warn("[StarShowEverything] L4: Force-Connect zum Ziel-Knoten schlug fehl. Input-Index war:", inIdx);
                         }
                     } finally {

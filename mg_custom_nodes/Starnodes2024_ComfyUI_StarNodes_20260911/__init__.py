@@ -460,14 +460,27 @@ try:
             else:
                 base_dir = folder_paths.get_output_directory()
 
-            src_path = os.path.join(base_dir, subfolder, filename) if subfolder else os.path.join(base_dir, filename)
+            # Security: prevent path traversal - the resolved paths must stay
+            # inside the chosen ComfyUI base directory.
+            base_real = os.path.realpath(base_dir)
+            src_path = os.path.realpath(os.path.join(base_real, subfolder, filename) if subfolder else os.path.join(base_real, filename))
+            try:
+                if os.path.commonpath([base_real, src_path]) != base_real:
+                    return web.json_response({"error": "Invalid path"}, status=400)
+            except (ValueError, OSError):
+                return web.json_response({"error": "Invalid path"}, status=400)
 
             if not os.path.isfile(src_path):
                 return web.json_response({"error": f"File not found: {filename}"}, status=404)
 
             base_name = os.path.splitext(filename)[0]
             jpg_filename = base_name + ".jpg"
-            dst_path = os.path.join(base_dir, subfolder, jpg_filename) if subfolder else os.path.join(base_dir, jpg_filename)
+            dst_path = os.path.realpath(os.path.join(base_real, subfolder, jpg_filename) if subfolder else os.path.join(base_real, jpg_filename))
+            try:
+                if os.path.commonpath([base_real, dst_path]) != base_real:
+                    return web.json_response({"error": "Invalid path"}, status=400)
+            except (ValueError, OSError):
+                return web.json_response({"error": "Invalid path"}, status=400)
 
             with _PIL_Image.open(src_path) as img:
                 img.convert("RGB").save(dst_path, "JPEG", quality=quality)

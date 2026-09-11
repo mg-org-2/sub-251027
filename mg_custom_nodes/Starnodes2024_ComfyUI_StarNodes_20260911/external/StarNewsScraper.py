@@ -67,11 +67,16 @@ class StarNewsScraper:
         Scrapes headlines from a given URL.
         """
         try:
+            # Security: only plain http(s) URLs are fetched, always with a
+            # timeout, and redirects stay limited.
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                print(f"[StarNewsScraper] Invalid URL (only http/https allowed): {url!r}")
+                return []
             # Fetch the webpage
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
             response.raise_for_status()
             
             # Parse the HTML content

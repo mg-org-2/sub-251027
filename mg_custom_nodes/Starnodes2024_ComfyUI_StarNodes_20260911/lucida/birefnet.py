@@ -1425,6 +1425,40 @@ from torchvision.models import vgg16, vgg16_bn, VGG16_Weights, VGG16_BN_Weights,
 
 config = Config()
 
+# Explicit whitelist of backbone builders. This replaces the original
+# eval()-based dynamic construction (security: no code execution from
+# strings, as required by the ComfyUI Registry policy).
+_BACKBONE_BUILDERS = {
+    'swin_v1_t': swin_v1_t,
+    'swin_v1_s': swin_v1_s,
+    'swin_v1_b': swin_v1_b,
+    'swin_v1_l': swin_v1_l,
+    'pvt_v2_b0': pvt_v2_b0,
+    'pvt_v2_b1': pvt_v2_b1,
+    'pvt_v2_b2': pvt_v2_b2,
+    'pvt_v2_b3': pvt_v2_b3,
+    'pvt_v2_b4': pvt_v2_b4,
+    'pvt_v2_b5': pvt_v2_b5,
+}
+
+
+def _parse_params_settings(params_settings):
+    """Parse simple 'key=value[,key=value]' strings into an int kwargs dict.
+
+    Only integer values are accepted - no eval(), no arbitrary code.
+    """
+    kwargs = {}
+    for part in (params_settings or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        key, sep, val = part.partition('=')
+        if not sep:
+            continue
+        kwargs[key.strip()] = int(val.strip())
+    return kwargs
+
+
 def build_backbone(bb_name, pretrained=True, params_settings=''):
     if bb_name == 'vgg16':
         bb_net = list(vgg16(pretrained=VGG16_Weights.DEFAULT if pretrained else None).children())[0]
@@ -1436,7 +1470,10 @@ def build_backbone(bb_name, pretrained=True, params_settings=''):
         bb_net = list(resnet50(pretrained=ResNet50_Weights.DEFAULT if pretrained else None).children())
         bb = nn.Sequential(OrderedDict({'conv1': nn.Sequential(*bb_net[0:3]), 'conv2': bb_net[4], 'conv3': bb_net[5], 'conv4': bb_net[6]}))
     else:
-        bb = eval('{}({})'.format(bb_name, params_settings))
+        builder = _BACKBONE_BUILDERS.get(bb_name)
+        if builder is None:
+            raise ValueError(f"StarNodes BiRefNet: unsupported backbone {bb_name!r}")
+        bb = builder(**_parse_params_settings(params_settings))
         if pretrained:
             bb = load_weights(bb, bb_name)
     return bb
@@ -1795,8 +1832,9 @@ class Decoder(nn.Module):
     def __init__(self, channels):
         super(Decoder, self).__init__()
         self.config = Config()
-        DecoderBlock = eval('BasicDecBlk')
-        LateralBlock = eval('BasicLatBlk')
+        # Fixed classes (were eval('BasicDecBlk') / eval('BasicLatBlk')).
+        DecoderBlock = _BLOCK_CLASSES['BasicDecBlk']
+        LateralBlock = _BLOCK_CLASSES['BasicLatBlk']
 
         self.decoder_block4 = DecoderBlock(channels[0], channels[1])
         self.decoder_block3 = DecoderBlock(channels[1], channels[2])
@@ -2024,6 +2062,28 @@ def patches2image(patches, grid_h=2, grid_w=2, patch_ref=None, transformation='(
     image = rearrange(patches, transformation, hg=grid_h, wg=grid_w)
     return image
 
+# Explicit whitelist of decoder/refiner block classes. This replaces the
+# original eval()-based dynamic lookups (security: no code execution from
+# strings, as required by the ComfyUI Registry policy).
+_BLOCK_CLASSES = {
+    'BasicDecBlk': BasicDecBlk,
+    'ResBlk': ResBlk,
+    'BasicLatBlk': BasicLatBlk,
+    'ASPP': ASPP,
+    'ASPPDeformable': ASPPDeformable,
+    'Refiner': Refiner,
+    'RefinerPVTInChannels4': RefinerPVTInChannels4,
+    'RefUNet': RefUNet,
+}
+
+
+def _block_class(name):
+    cls = _BLOCK_CLASSES.get(name)
+    if cls is None:
+        raise ValueError(f"StarNodes BiRefNet: unsupported block class {name!r}")
+    return cls
+
+
 class BiRefNet(
     PreTrainedModel
 ):
@@ -2044,9 +2104,12 @@ class BiRefNet(
             )
 
         if self.config.squeeze_block:
+            # '<BlockClass>_x<N>' pattern, resolved via whitelist (no eval()).
+            _sq_name, _sq_count = self.config.squeeze_block.split('_x')
+            _sq_cls = _block_class(_sq_name)
             self.squeeze_module = nn.Sequential(*[
-                eval(self.config.squeeze_block.split('_x')[0])(channels[0]+sum(self.config.cxt), channels[0])
-                for _ in range(eval(self.config.squeeze_block.split('_x')[1]))
+                _sq_cls(channels[0]+sum(self.config.cxt), channels[0])
+                for _ in range(int(_sq_count))
             ])
 
         self.decoder = Decoder(channels)
@@ -2063,7 +2126,7 @@ class BiRefNet(
             if self.config.refine == 'itself':
                 self.stem_layer = StemLayer(in_channels=3+1, inter_channels=48, out_channels=3, norm_layer='BN' if self.config.batch_size > 1 else 'LN')
             else:
-                self.refiner = eval('{}({})'.format(self.config.refine, 'in_channels=3+1'))
+                self.refiner = _block_class(self.config.refine)(in_channels=3+1)
 
         if self.config.freeze_bb:
             # Freeze the backbone...
@@ -2130,8 +2193,9 @@ class Decoder(nn.Module):
     def __init__(self, channels):
         super(Decoder, self).__init__()
         self.config = Config()
-        DecoderBlock = eval(self.config.dec_blk)
-        LateralBlock = eval(self.config.lat_blk)
+        # Resolved via whitelist (were eval(self.config.dec_blk/lat_blk)).
+        DecoderBlock = _block_class(self.config.dec_blk)
+        LateralBlock = _block_class(self.config.lat_blk)
 
         if self.config.dec_ipt:
             self.split = self.config.dec_ipt_split

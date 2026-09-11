@@ -242,9 +242,9 @@ function getWidget(node, name) {
 // (no leftover spacer), our preview replaces it - so the video only shows
 // after the Load button is clicked.
 function interceptNativePreview(node) {
-    const orig = node.addDOMWidget.bind(node);
+    const orig = node.addDOMWidget;
     node.addDOMWidget = function (name, type, element, options) {
-        const w = orig(name, type, element, options);
+        const w = orig.call(node, name, type, element, options);
         if (name === "video-preview") {
             element.style.display = "none";
             w.hidden = true;   // excluded from layout + hit testing

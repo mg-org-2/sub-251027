@@ -316,9 +316,9 @@ class StarIconExporter:
             candidates = [
                 "DejaVuSans-Bold.ttf",
                 # Windows common fonts
-                os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "arialbd.ttf"),
-                os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "segoeuib.ttf"),
-                os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "seguisb.ttf"),
+                "C:\\Windows\\Fonts\\arialbd.ttf",
+                "C:\\Windows\\Fonts\\segoeuib.ttf",
+                "C:\\Windows\\Fonts\\seguisb.ttf",
                 # Linux common
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",

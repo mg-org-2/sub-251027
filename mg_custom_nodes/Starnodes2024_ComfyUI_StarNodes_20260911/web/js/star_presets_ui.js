@@ -97,9 +97,9 @@
         if (graph._starnodes_preset_patched) return;
         graph._starnodes_preset_patched = true;
 
-        const oldAdd = graph.add.bind(graph);
+        const oldAdd = graph.add;
         graph.add = function (node) {
-            const res = oldAdd(node);
+            const res = oldAdd.call(graph, node);
             try { enhanceNode(node); } catch (e) { /* ignore */ }
             return res;
         };

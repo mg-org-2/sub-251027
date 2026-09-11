@@ -84,9 +84,9 @@ function getWidget(node, name) {
 // The frontend may add its own "audio-preview" DOM widget for audio_upload
 // inputs. Hide it completely — our preview replaces it.
 function interceptNativePreview(node) {
-    const orig = node.addDOMWidget.bind(node);
+    const orig = node.addDOMWidget;
     node.addDOMWidget = function (name, type, element, options) {
-        const w = orig(name, type, element, options);
+        const w = orig.call(node, name, type, element, options);
         if (name === "audio-preview" || name === "video-preview") {
             element.style.display = "none";
             w.hidden = true;

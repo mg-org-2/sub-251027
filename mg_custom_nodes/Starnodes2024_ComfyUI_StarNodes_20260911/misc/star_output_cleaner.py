@@ -29,6 +29,10 @@ except Exception:  # pragma: no cover - PIL is bundled with ComfyUI
 
 NODE_NAME = "StarOutputCleaner"
 OUTPUT_DIR = folder_paths.get_output_directory()
+# Security: custom folders are only allowed inside the ComfyUI base
+# directory, so the unauthenticated routes can never read, list or delete
+# arbitrary files elsewhere on the machine.
+COMFY_BASE_DIR = os.path.realpath(getattr(folder_paths, "base_path", os.path.dirname(OUTPUT_DIR)))
 THUMB_SIZE = 200
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
@@ -64,6 +68,8 @@ def _resolve_root(params):
         root = os.path.realpath(os.path.expanduser(custom))
         if not os.path.isdir(root):
             return None, f"folder not found: {root}"
+        if not _is_within(root, COMFY_BASE_DIR):
+            return None, "custom folder must be inside the ComfyUI directory"
         return root, None
     return os.path.realpath(OUTPUT_DIR), None
 
@@ -244,27 +250,18 @@ async def star_cleaner_browse(request):
 
     Only directory names are returned (never files). Hidden folders
     (starting with '.') are skipped; they can still be typed manually.
-    On Windows the available drives are always included as 'drives'.
+    Security: browsing is restricted to the ComfyUI base directory.
     """
     q = request.rel_url.query
     path = (q.get("path", "") or "").strip()
 
-    drives = []
-    if os.name == "nt":
-        drives = [f"{d}:\\" for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                  if os.path.isdir(f"{d}:\\")]
-
-    # Windows with no path -> the drive list itself
-    if not path and os.name == "nt":
-        return web.json_response({"path": "", "parent": "", "dirs": drives,
-                                  "drives": drives})
-
     if not path:
-        path = os.path.expanduser("~")  # sensible starting point
+        path = os.path.realpath(OUTPUT_DIR)  # sensible, safe starting point
     root = os.path.realpath(path)
     if not os.path.isdir(root):
-        return web.json_response({"error": f"folder not found: {root}",
-                                  "drives": drives}, status=400)
+        return web.json_response({"error": f"folder not found: {root}"}, status=400)
+    if not _is_within(root, COMFY_BASE_DIR):
+        return web.json_response({"error": "browsing is restricted to the ComfyUI directory"}, status=403)
 
     dirs = []
     try:
@@ -276,15 +273,14 @@ async def star_cleaner_browse(request):
                 except OSError:
                     continue
     except PermissionError:
-        return web.json_response({"error": f"permission denied: {root}",
-                                  "drives": drives}, status=403)
+        return web.json_response({"error": f"permission denied: {root}"}, status=403)
 
     dirs.sort(key=str.lower)
     parent = os.path.dirname(root)
-    if parent == root:
-        parent = ""  # already at the filesystem root
-    return web.json_response({"path": root, "parent": parent, "dirs": dirs,
-                              "drives": drives})
+    # Never offer a parent that leaves the ComfyUI base directory.
+    if parent == root or not _is_within(parent, COMFY_BASE_DIR):
+        parent = ""
+    return web.json_response({"path": root, "parent": parent, "dirs": dirs})
 
 
 @routes.post("/star_output_cleaner/delete")

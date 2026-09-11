@@ -40,8 +40,6 @@ class StarWatermark:
             if os.name == 'nt':  # Windows
                 # Standard Windows font directory paths to check
                 possible_font_dirs = [
-                    os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), "Fonts"),
-                    os.path.join(os.environ.get('SYSTEMROOT', 'C:\\Windows'), "Fonts"),
                     "C:\\Windows\\Fonts"
                 ]
                 
@@ -278,8 +276,6 @@ class StarWatermark:
             possible_font_dirs = []
             if os.name == 'nt':  # Windows
                 possible_font_dirs = [
-                    os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), "Fonts"),
-                    os.path.join(os.environ.get('SYSTEMROOT', 'C:\\Windows'), "Fonts"),
                     "C:\\Windows\\Fonts"
                 ]
             

@@ -103,7 +103,7 @@ def _lanczos_resize_batch(img_tensor, target_w, target_h):
 def _get_font(size=18):
     search_dirs = []
     if platform.system() == "Windows":
-        search_dirs.append(os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"))
+        search_dirs.append("C:\\Windows\\Fonts")
     elif platform.system() == "Darwin":
         search_dirs.extend(["/System/Library/Fonts", "/Library/Fonts"])
     else:

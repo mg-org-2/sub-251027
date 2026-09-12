@@ -111,6 +111,14 @@ def _find_python(preferred_minors: tuple[int, ...]) -> tuple[list[str], str]:
         if found and found[0] == 3 and found[1] in preferred_minors:
             return candidate, f"Python {found[2]}"
     versions = ", ".join(f"3.{minor}" for minor in preferred_minors)
+    if os.name == "nt" and set(preferred_minors) == {10, 11}:
+        raise RuntimeError(
+            "SheetSage2 cover tools require Python 3.10 or 3.11; they cannot use the "
+            "Python 3.12/3.13 runtime bundled with ComfyUI. Install Python 3.11.9 from "
+            "https://www.python.org/downloads/release/python-3119/ with the Windows py "
+            "launcher enabled, confirm `py -3.11 --version` in Command Prompt, restart "
+            "ComfyUI, and run this button again."
+        )
     raise RuntimeError(f"Could not find a supported Python ({versions}). Install it with the Windows py launcher enabled.")
 
 
@@ -173,6 +181,11 @@ def _install_generation(root: Path, lines: list[str]) -> Path:
     _ensure_source(root, lines)
     python = _ensure_venv(root, root / ".venv", (12, 11, 10), lines)
     _run([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], root, lines)
+    _emit(lines, "[VRGDG/YuE2 installer] Installing CUDA-enabled PyTorch 2.10.0 (CUDA 13.0)")
+    _run([
+        python, "-m", "pip", "install", "--upgrade", "torch==2.10.0+cu130",
+        "--index-url", "https://download.pytorch.org/whl/cu130",
+    ], root, lines)
     _run([python, "-m", "pip", "install", "--upgrade", "."], root, lines)
     return python
 

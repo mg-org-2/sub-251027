@@ -386,13 +386,15 @@ Master the Pixaroma suite with our video guides and workflow deep-dives:
 
 ## 🛠 Changelog
 
-### **September 11, 2026 · v1.4.145–v1.4.146**
-- **Fixed: Save Text kept only the first result** when a whole folder of images ran through it. Every one is collected now.
-- **Fixed: a button colour you picked came back orange after a reload**, and the hover highlight stayed orange too.
-- **Fixed: opening a workflow and closing it asked "Save changes?" with nothing changed.** XY Plot and Load Images from Folder were resizing themselves.
-- **Fixed: the settings gear on Prompt Each and Music Prompt** opened the colour panel instead of the node's own settings.
-- **Remove Background now names the folders it looked in** when a model is missing, instead of only the default one.
-- **Plus: Control Panel help explains a slider's Step**, which also re-snaps your value.
+### **September 11, 2026 · v1.4.145–v1.4.148**
+- **Fixed: bypassing a node could break the wire below it.** Show Text, Switch, Notify and Free VRAM stopped with "missing input" or passed the wrong value.
+- **Fixed: Save Text kept only the first result** of a folder run.
+- **Fixed: a picked button colour came back orange after a reload**, hover too.
+- **Fixed: opening and closing a workflow asked "Save changes?"** with nothing changed.
+- **Fixed: the settings gear on Prompt Each and Music Prompt** opened the colour panel.
+- **The video nodes now install ffmpeg with the pack**, so they work on a fresh setup. Update through Manager or your launcher, not git on its own.
+- **Remove Background names every folder it searched** when a model is missing.
+- **Clearer help** for Control Panel's Step and for Mute Switch.
 
 ### **September 7, 2026 · v1.4.144**
 - **Fixed: selecting text in Prompt, AI Prompt and Music Prompt showed no highlight.** The words were selected and copying worked, but nothing showed, so there was no way to tell.

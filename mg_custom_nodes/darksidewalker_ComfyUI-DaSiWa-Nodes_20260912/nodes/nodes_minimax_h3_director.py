@@ -120,7 +120,7 @@ class MiniMaxH3Director:
             input_directory = None
 
         if mode == "Image Inpaint":
-            image_items = [pair for pair in items if pair[1].get("type") == "image"]
+            image_items = [pair for pair in items if pair[1].get("type") == "image" and pair[1].get("slot", pair[0]) == 0]
             incompatible_items = [pair[1].get("type") for pair in items if pair[1].get("type") != "image"]
             if incompatible_items:
                 raise ValueError("Image Inpaint accepts image references only; video and audio references are not supported")
@@ -137,10 +137,24 @@ class MiniMaxH3Director:
             image_items = sorted((pair for pair in items if pair[1].get("type") == "image"), key=lambda pair: (pair[1].get("slot", pair[0]), pair[0]))
             if mode == "T2VA":
                 image_items = []
-            elif mode in {"I2VA", "L2VA"}:
-                image_items = image_items[:1]
+            elif mode == "I2VA":
+                # Bound to slot 0 specifically, not "whichever is lowest" -- a
+                # REF2VA-era image at slot 2+ must never get pulled in just
+                # because slot 0's image was deleted.
+                image_items = [pair for pair in image_items if pair[1].get("slot", pair[0]) == 0]
+            elif mode == "L2VA":
+                # New timelines reserve slot 0 as the FL2VA holdover and use slot 1
+                # as the closing frame. Older saved L2VA workflows used slot 0 as
+                # their only frame, so preserve that established state when no slot
+                # 1 item exists. Never fall through to unrelated REF2VA slots.
+                slot_one_items = [pair for pair in image_items if pair[1].get("slot", pair[0]) == 1]
+                image_items = slot_one_items or [pair for pair in image_items if pair[1].get("slot", pair[0]) == 0]
             else:
-                image_items = image_items[:2]
+                # FL2VA: bound to exactly {0, 1}, not "lowest 2 remaining" -- same
+                # reasoning as I2VA/L2VA above, and it also means the two items
+                # here (if both present) are always genuinely slot 0 and slot 1,
+                # so the "slot == 1" check below can no longer miss both.
+                image_items = [pair for pair in image_items if pair[1].get("slot", pair[0]) in (0, 1)]
             for index, (_, item) in enumerate(image_items):
                 value = item.get("value", item.get("tensor"))
                 if isinstance(value, str) and input_directory:
